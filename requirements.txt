@@ -1,0 +1,17 @@
+streamlit
+pandas
+scikit-learn
+fpdf2
+plotly
+langchain
+langchain-community
+langchain-groq
+geopy
+gTTS
+SpeechRecognition
+streamlit-mic-recorder
+noisereduce
+pydub
+scipy
+numpy
+edge-tts

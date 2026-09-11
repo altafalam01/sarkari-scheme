@@ -1,0 +1,31 @@
+# Secrets — NEVER commit
+.streamlit/secrets.toml
+.env
+
+# Local data files
+data/favorites.json
+data/history.json
+data/reminders.json
+data/applications.json
+data/user_profile.json
+data/search_history.json
+data/assistant_log.json
+data/scraped_candidates.csv
+data/scraped_visited_urls.csv
+data/scraper_schedule.json
+data/notification_settings.json
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Temp/test files
+test_hindi.mp3
+test_report.pdf.streamlit/secrets.toml
