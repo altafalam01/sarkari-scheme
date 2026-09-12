@@ -1,59 +1,5 @@
-# .streamlit/config.toml
-# ===========================
-# Streamlit App Configuration
-# ===========================
-# NOTE: Ye colors sirf Streamlit ke NATIVE widgets (buttons, inputs, etc.) ko
-# affect karte hain. Aapke custom HTML elements (scheme cards, chips, hero)
-# themes.py se styled hote hain. Dono ko sync rakho.
-
 [theme]
-# Base theme — "dark" rakho taaki native widgets dark-styled rahein
-# (light mode toggle themes.py se handle hota hai)
 base = "dark"
-
-# Primary accent — buttons, links, sliders, focus rings
-# themes.py mein cyan (#00E5FF) is default accent ko override karta hai,
-# lekin yeh fallback rehna chahiye jab themes.py load na ho.
 primaryColor = "#00E5FF"
-
-# Backgrounds — themes.py ke C['app_bg'] aur C['card_bg'] se match
 backgroundColor = "#0E1117"
 secondaryBackgroundColor = "#1C2333"
-
-# Text color — themes.py ke C['text'] se match
-textColor = "#FAFAFA"
-
-# Font — Poppins themes.py mein @import hota hai;
-# yahan fallback chain do taaki agar import fail ho to readable rahe.
-font = "sans serif"
-
-# ===========================
-# Browser / Server Settings
-# ===========================
-[server]
-# Mobile/network testing ke liye — same Wi-Fi se accessible hoga
-headless = false
-enableCORS = false
-enableXsrfProtection = true
-maxUploadSize = 20
-
-# ===========================
-# Browser Settings
-# ===========================
-[browser]
-# Sidebar default open rakho taaki navigation turant dikhe
-gatherUsageStats = false
-
-# ===========================
-# Client Settings
-# ===========================
-[client]
-# Toolbar ko "minimal" rakho (Deploy button chhupa do jab local chala rahe ho)
-# Agar aap Streamlit Cloud pe deploy karte ho, to "developer" ya "auto" rakho
-toolbarMode = "minimal"
-
-# ===========================
-# Logger Settings
-# ===========================
-[logger]
-level = "info"
