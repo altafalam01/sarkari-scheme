@@ -8,6 +8,18 @@ Complete version with all 7 smart features:
   5. Save Profile to User Data
   6. Quick Reply Suggestions
   7. Assistant Analytics (Logging)
+
+FIXES (v3):
+  - GROQ_MODEL_NAME now loaded from .env (fixes 404 deprecation error)
+  - NL chat mode now properly reruns after response (fixes "no reply" bug)
+  - Duplicate headings removed
+  - Rule-based fallback when AI fails (search always works)
+  - Mode switch clears stale chat state
+  - Search Schemes (TF-IDF) integrated as fallback
+  - ✅ v3: process_smart_query now uses LLM-extracted KEYWORDS for search
+         (fixes 506-schemes over-broad matching bug)
+  - ✅ v3: Better LLM prompt for structured JSON keyword extraction
+  - ✅ v3: Debug prints for troubleshooting LLM failures
 """
 
 import os
@@ -29,6 +41,10 @@ from translations import get_text
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# ✅ FIX: Model name ab .env se load hota hai — 404 error gone
+# Agar future mein Groq model deprecate kare, sirf .env badlo — code nahi
+DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL_NAME", "openai/gpt-oss-20b")
+
 
 # ===========================
 # AUTO-SCROLL HELPER (Modern Chat Style)
@@ -39,22 +55,17 @@ def auto_scroll_to_bottom():
     components.html(
         """
         <script>
-            // Parent window ko access karo
             const parentDoc = window.parent.document;
             
-            // Scroll function
             function scrollToBottom() {
-                // Sabse pehle chat input dhoondho (jahan user type karta hai)
                 const chatInput = parentDoc.querySelector('.stChatFloatingInputContainer');
                 
-                // Agar chat input mil gaya, to uske upar wale container par scroll karo
                 if (chatInput) {
                     chatInput.scrollIntoView({ 
                         behavior: 'smooth', 
                         block: 'end' 
                     });
                 } else {
-                    // Fallback: poore page ko bottom tak scroll karo
                     const mainContainer = parentDoc.querySelector('.main') || parentDoc.querySelector('section.main');
                     if (mainContainer) {
                         mainContainer.scrollTo({
@@ -62,7 +73,6 @@ def auto_scroll_to_bottom():
                             behavior: 'smooth'
                         });
                     } else {
-                        // Aur bhi fallback - window scroll
                         window.parent.scrollTo({
                             top: parentDoc.body.scrollHeight,
                             behavior: 'smooth'
@@ -71,7 +81,6 @@ def auto_scroll_to_bottom():
                 }
             }
             
-            // Thoda delay de kar scroll karo (Streamlit DOM render hone ke baad)
             setTimeout(scrollToBottom, 300);
         </script>
         """,
@@ -144,7 +153,6 @@ def get_dynamic_questions(profile):
     gender = str(profile.get("gender", "")).lower()
     age = profile.get("age", 0)
     
-    # Age range se integer nikaalne ka helper
     try:
         if "-" in str(age):
             age_int = int(str(age).split("-")[0])
@@ -227,7 +235,6 @@ def get_dynamic_questions(profile):
             "type": "single"
         })
     
-    # ✅ General question
     questions.append({
         "key": "special_needs",
         "question": "Do you have any special category?",
@@ -257,6 +264,12 @@ def init_assistant_state():
         st.session_state.assistant_mode = "profile"
     if "nl_chat_history" not in st.session_state:
         st.session_state.nl_chat_history = []
+    # ✅ FIX: Track last schemes for NL mode so cards render properly
+    if "nl_last_schemes" not in st.session_state:
+        st.session_state.nl_last_schemes = []
+    # ✅ FIX: Track last assistant mode to clear stale state
+    if "_last_assistant_mode" not in st.session_state:
+        st.session_state._last_assistant_mode = None
 
 
 def reset_assistant():
@@ -267,31 +280,25 @@ def reset_assistant():
     st.session_state.assistant_results = []
     st.session_state.assistant_complete = False
     st.session_state.nl_chat_history = []
+    st.session_state.nl_last_schemes = []
 
 
 # ===========================
 # HELPER: CONVERT RANGE TO NUMBER
 # ===========================
 def extract_number_from_range(value):
-    """Range string (jaise '18-25' ya '60,001 - 80,000') se ek number nikaalta hai.
-    Matching ke liye lower bound use karte hain, aur '65+' ke liye 65,
-    aur '12,00,001+' ke liye 1200001 return karta hai."""
+    """Range string (jaise '18-25' ya '60,001 - 80,000') se ek number nikaalta hai."""
     if value is None or value in ["All", ""]:
         return None
     
-    val_str = str(value).strip()
+    val_str = str(value).strip().replace(",", "")
     
-    # Comma hatao
-    val_str = val_str.replace(",", "")
-    
-    # "65+" jaisa case
     if val_str.endswith("+"):
         try:
             return int(val_str.replace("+", "").strip())
         except ValueError:
             return None
     
-    # "18-25" jaisa case - lower bound
     if "-" in val_str:
         try:
             lower = val_str.split("-")[0].strip()
@@ -299,7 +306,6 @@ def extract_number_from_range(value):
         except (ValueError, IndexError):
             return None
     
-    # Plain number
     try:
         return int(val_str)
     except ValueError:
@@ -328,7 +334,6 @@ def log_assistant_query(query, matched_count, profile=None):
             "timestamp": datetime.now().isoformat()
         })
         
-        # Keep only last 500 entries
         log = log[-500:]
         
         with open(log_file, "w") as f:
@@ -343,7 +348,6 @@ def log_assistant_query(query, matched_count, profile=None):
 def save_profile_to_user_data(profile):
     """Save user profile to data/user_profile.json."""
     try:
-        # Age aur income ko number mein convert karo
         age_val = extract_number_from_range(profile.get("age", 25))
         income_val = extract_number_from_range(profile.get("income", 200000))
         
@@ -363,6 +367,49 @@ def save_profile_to_user_data(profile):
         return True
     except Exception:
         return False
+
+
+# ===========================
+# ✅ FIX: RULE-BASED FALLBACK SEARCH
+# ===========================
+def fallback_search_schemes(query, df, top_n=5):
+    """
+    Jab LLM fail ho jaaye, TF-IDF based search use karo.
+    Isse ensure hota hai ki search HAMESHA kaam kare — AI ho ya na ho.
+    """
+    try:
+        # Try importing nl_search's search_schemes (TF-IDF based)
+        from nl_search import search_schemes as nl_search_fn
+        results = nl_search_fn(df, query, top_n=top_n)
+        return results
+    except Exception:
+        # Agar wo bhi fail ho jaaye, to simple keyword matching
+        try:
+            query_lower = query.lower()
+            keywords = [w for w in query_lower.split() if len(w) > 2]
+            scored = []
+            for _, row in df.iterrows():
+                text = f"{row.get('scheme_name', '')} {row.get('description', '')} {row.get('benefits', '')}".lower()
+                score = sum(1 for kw in keywords if kw in text)
+                if score > 0:
+                    scored.append((score, row))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            
+            results = []
+            for _, row in scored[:top_n]:
+                results.append({
+                    "scheme_name": row.get("scheme_name", ""),
+                    "category_type": row.get("category_type", ""),
+                    "applicable_state": row.get("applicable_state", ""),
+                    "description": row.get("description", ""),
+                    "benefits": row.get("benefits", ""),
+                    "apply_link": row.get("apply_link", ""),
+                    "deadline": row.get("deadline", None),
+                    "score": 0.5,
+                })
+            return results
+        except Exception:
+            return []
 
 
 # ===========================
@@ -400,82 +447,174 @@ def generate_ai_recommendation(profile, matched_schemes):
 
 
 # ===========================
-# FEATURE 2: NL SMART QUERY PROCESSOR
+# FEATURE 2: NL SMART QUERY PROCESSOR (v3)
 # ===========================
 def process_smart_query(query, df):
-    """Process user query using AI to extract intent and find schemes."""
+    """
+    Process user query using AI to extract intent and find schemes.
     
-    llm = get_llm()
-    if not llm:
-        return {
-            "message": "⚠️ AI not available. Please configure GROQ_API_KEY.",
-            "schemes": []
-        }
+    ✅ FIX v3: Ab keywords + intent ko bhi use karta hai (sirf profile filters nahi).
     
-    extraction_prompt = f"""
-    User query: "{query}"
-    
-    Extract structured information from this query. Return ONLY valid JSON (no markdown, no explanation):
-    {{
-        "age": <number or null>,
-        "gender": "<Male/Female/All>",
-        "state": "<state name or 'All'>",
-        "occupation": "<Student/Farmer/etc or 'All'>",
-        "income": <number or null>,
-        "category": "<SC/ST/OBC/General/Minority or 'All'>",
-        "keywords": ["keyword1", "keyword2"],
-        "intent": "<scheme type or purpose>"
-    }}
+    Flow:
+      1. LLM se structured intent nikalo (age, gender, state, keywords, etc.)
+      2. LLM keywords se TF-IDF search karo (nl_search.search_schemes)
+      3. Profile filters (state) se filter karo
+      4. Agar kuch na mile → pure keyword fallback
     """
     
+    # ✅ Import yahan — circular imports se bachne ke liye
     try:
-        response = llm.invoke(extraction_prompt)
-        content = response.content.strip()
-        # Clean up markdown code blocks
-        content = content.replace("```json", "").replace("```", "").strip()
-        intent = json.loads(content)
-    except Exception:
-        intent = {
-            "keywords": query.split()[:5], 
-            "intent": "general",
-            "gender": "All",
-            "state": "All",
-            "occupation": "All",
-            "category": "All"
-        }
+        from nl_search import search_schemes as nl_search_fn
+        nl_search_available = True
+    except ImportError:
+        nl_search_available = False
     
-    # Match schemes based on extracted intent
-    try:
-        matched = match_schemes(
-            df,
-            age=intent.get("age") or 25,
-            gender=intent.get("gender", "All"),
-            social_category=intent.get("category", "All"),
-            occupation=intent.get("occupation", "All"),
-            state=intent.get("state", "All"),
-            annual_income=intent.get("income"),
-            only_eligible=False
-        )
-    except Exception:
-        matched = []
+    llm = get_llm()
     
-    if matched:
-        response_msg = f"""
-        ✅ **Maine {len(matched)} schemes aapke liye dhundhi hain!**
+    # Default intent (agar LLM fail ho ya key na ho)
+    intent = {
+        "age": None,
+        "gender": "All",
+        "state": "All",
+        "occupation": "All",
+        "income": None,
+        "category": "All",
+        "keywords": [w for w in query.split() if len(w) > 2][:5],
+        "intent": "general"
+    }
+    
+    llm_used = False
+    
+    # ===========================
+    # STEP 1: LLM se intent extract karo
+    # ===========================
+    if llm:
+        extraction_prompt = f"""User query: "{query}"
+
+Extract structured information. Return ONLY valid JSON, no other text:
+{{
+    "age": <number or null>,
+    "gender": "<Male/Female/All>",
+    "state": "<state name or 'All'>",
+    "occupation": "<Student/Farmer/etc or 'All'>",
+    "income": <number or null>,
+    "category": "<SC/ST/OBC/General/Minority or 'All'>",
+    "keywords": ["important", "search", "terms", "like", "housing", "loan"],
+    "intent": "<one-word purpose like housing/education/health/agriculture/pension>"
+}}
+
+Rules:
+- "keywords" should be 2-5 SHORT words from the query that capture the TOPIC (e.g. "housing", "loan", "scholarship")
+- "intent" should be a SINGLE category word
+- Return ONLY the JSON object, nothing else"""
         
-        Aapki query: *"{query}"*
+        try:
+            response = llm.invoke(extraction_prompt)
+            content = response.content.strip()
+            # Strip markdown code fences if present
+            content = content.replace("```json", "").replace("```", "").strip()
+            # Sometimes LLM adds text before/after JSON — extract just the {...}
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                content = json_match.group(0)
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                intent.update(parsed)
+                llm_used = True
+        except Exception as e:
+            # ✅ DEBUG: Terminal mein error print karo (helpful for debugging)
+            print(f"[AI DEBUG] Intent extraction failed: {type(e).__name__}: {str(e)[:200]}")
+    
+    # ===========================
+    # STEP 2: LLM keywords se TF-IDF search karo
+    # ===========================
+    keyword_results = []
+    
+    if nl_search_available and llm_used:
+        # LLM ne keywords nikale — unhe primary search ke liye use karo
+        keywords = intent.get("keywords", [])
+        intent_word = intent.get("intent", "")
         
-        Top recommendations neeche di gayi hain. 👇
-        """
+        # Build search query from keywords + intent
+        search_terms = " ".join(str(k) for k in keywords if k)
+        if intent_word and intent_word.lower() not in ["general", "none", ""]:
+            search_terms = f"{search_terms} {intent_word}".strip()
+        
+        if search_terms:
+            try:
+                keyword_results = nl_search_fn(df, search_terms, top_n=30)
+            except Exception as e:
+                print(f"[AI DEBUG] Keyword search failed: {e}")
+                keyword_results = []
+    
+    # ===========================
+    # STEP 3: Profile filters apply karo (agar keywords mile)
+    # ===========================
+    matched = []
+    
+    if keyword_results:
+        # Keyword search se mili schemes pe state filter apply karo
+        try:
+            state_val = intent.get("state", "All")
+            
+            for r in keyword_results:
+                r_state = r.get("applicable_state", "All")
+                # Agar user ne state specify ki hai, to us state ya "All" wali schemes rakho
+                if state_val and state_val != "All" and r_state != "All" and r_state != state_val:
+                    continue
+                matched.append(r)
+            
+            # Agar state filter ne sab kuch hata diya, to keyword_results hi use karo
+            if not matched:
+                matched = keyword_results
+        except Exception as e:
+            print(f"[AI DEBUG] Profile filter failed: {e}")
+            matched = keyword_results
+    
+    # ===========================
+    # STEP 4: Agar kuch nahi mila → pure fallback
+    # ===========================
+    if not matched:
+        matched = fallback_search_schemes(query, df, top_n=5)
+    
+    # ===========================
+    # STEP 5: Response message banao
+    # ===========================
+    matched_count = len(matched)
+    
+    if matched_count > 0:
+        if llm_used and keyword_results:
+            # AI ne kaam kiya aur relevant schemes mili
+            response_msg = f"""✅ **Maine {matched_count} relevant schemes dhundhi hain!**
+
+Aapki query: *"{query}"*
+
+Top recommendations neeche di gayi hain. 👇"""
+        elif llm_used:
+            # AI ne intent nikala lekin keyword search se kuch nahi mila
+            response_msg = f"""✅ **Maine {matched_count} schemes dhundhi hain!**
+
+Aapki query: *"{query}"*
+
+Top recommendations neeche di gayi hain. 👇"""
+        else:
+            # LLM fail hua, fallback chala
+            response_msg = f"""✅ **Maine {matched_count} relevant schemes dhundhi hain!**
+
+Aapki query: *"{query}"*
+
+*Note: AI temporarily unavailable, isliye smart keyword search use kiya gaya.*
+
+Top recommendations neeche di gayi hain. 👇"""
     else:
-        response_msg = f"""
-        ❌ **Sorry, koi matching scheme nahi mili.**
-        
-        Kya aap thoda aur detail mein bata sakte hain?
-        - Aapki age?
-        - Aap kahan rehte hain?
-        - Aapki zaroorat kya hai?
-        """
+        response_msg = f"""❌ **Sorry, koi matching scheme nahi mili.**
+
+Aapki query: *"{query}"*
+
+Kya aap thoda aur detail mein bata sakte hain?
+- Aapki age?
+- Aap kahan rehte hain?
+- Aapki zaroorat kya hai?"""
     
     return {
         "message": response_msg,
@@ -503,11 +642,25 @@ def render_quick_suggestions():
         with cols[i % 2]:
             if st.button(sugg, key=f"quick_sugg_{i}", use_container_width=True):
                 st.session_state.nl_chat_history.append({"role": "user", "content": sugg})
+                # ✅ FIX: Process this query right away
+                try:
+                    df = load_schemes()
+                    response = process_smart_query(sugg, df)
+                    st.session_state.nl_chat_history.append({
+                        "role": "assistant",
+                        "content": response["message"]
+                    })
+                    st.session_state.nl_last_schemes = response.get("schemes", [])
+                except Exception as e:
+                    st.session_state.nl_chat_history.append({
+                        "role": "assistant",
+                        "content": f"⚠️ Error: {e}"
+                    })
                 st.rerun()
 
 
 # ===========================
-# NL CHAT MODE RENDER
+# NL CHAT MODE RENDER (FIXED)
 # ===========================
 def render_nl_chat_mode(df, render_scheme_card, sort_results, t):
     """Natural language chat mode - user describes problem in own words."""
@@ -515,10 +668,18 @@ def render_nl_chat_mode(df, render_scheme_card, sort_results, t):
     st.markdown("#### 💬 Apni samasya batayein")
     st.caption("Aap Hindi, English, ya Hinglish mein likh sakte hain")
     
-    # Display chat history
+    # ✅ Display chat history
     for msg in st.session_state.nl_chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+    
+    # ✅ Show last schemes (agar koi hain)
+    if st.session_state.get("nl_last_schemes"):
+        st.markdown("---")
+        st.markdown("### 🎯 Recommended Schemes:")
+        if render_scheme_card and t:
+            for r in st.session_state.nl_last_schemes[:5]:
+                render_scheme_card(r, t, "ai_chat", "English")
     
     # ✅ Quick suggestions (only if no history)
     if not st.session_state.nl_chat_history:
@@ -531,67 +692,65 @@ def render_nl_chat_mode(df, render_scheme_card, sort_results, t):
     )
     
     if user_query:
-        # Add user message
+        # ✅ FIX: Append user message + process + append assistant message
+        # BEFORE rendering anything (taaki Streamlit rerun pe sab complete ho)
         st.session_state.nl_chat_history.append({"role": "user", "content": user_query})
         
-        with st.chat_message("user"):
-            st.markdown(user_query)
+        # Process with AI (spinner)
+        with st.spinner("🤖 Soch raha hun..."):
+            try:
+                response = process_smart_query(user_query, df)
+                assistant_msg = response.get("message", "No response")
+                st.session_state.nl_chat_history.append({
+                    "role": "assistant",
+                    "content": assistant_msg
+                })
+                # ✅ Save schemes for rendering
+                if response.get("schemes"):
+                    st.session_state.nl_last_schemes = response["schemes"]
+                else:
+                    st.session_state.nl_last_schemes = []
+                
+                # Log analytics
+                log_assistant_query(user_query, len(response.get("schemes", [])))
+            except Exception as e:
+                st.session_state.nl_chat_history.append({
+                    "role": "assistant",
+                    "content": f"⚠️ Error: {e}"
+                })
+                st.session_state.nl_last_schemes = []
         
-        # Process with AI
-        with st.chat_message("assistant"):
-            with st.spinner("🤖 AI soch raha hai..."):
-                try:
-                    response = process_smart_query(user_query, df)
-                    st.markdown(response["message"])
-                    
-                    # ✅ Log for analytics
-                    log_assistant_query(user_query, len(response["schemes"]))
-                    
-                    # Save to history
-                    st.session_state.nl_chat_history.append({
-                        "role": "assistant",
-                        "content": response["message"]
-                    })
-                    
-                    # Show schemes
-                    if response["schemes"]:
-                        st.markdown("---")
-                        st.markdown("### 🎯 Recommended Schemes:")
-                        if render_scheme_card and t:
-                            for r in response["schemes"]:
-                                render_scheme_card(r, t, "ai_chat", "English")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+        # ✅ FIX: Force rerun so history renders completely
+        st.rerun()
     
     # Reset chat button
     if st.session_state.nl_chat_history:
         if st.button("🔄 Start New Chat", use_container_width=True, key="reset_nl_chat"):
             st.session_state.nl_chat_history = []
+            st.session_state.nl_last_schemes = []
             st.rerun()
+    
+    # ✅ Auto-scroll
+    auto_scroll_to_bottom()
 
 
 # ===========================
-# PROFILE MODE RENDER (Existing + Improvements)
+# PROFILE MODE RENDER
 # ===========================
 def render_profile_mode(df, render_scheme_card, sort_results, t):
     """Profile-based mode with dynamic questions."""
     
-    # Initialize session state
     init_assistant_state()
     
-    # ✅ Get DYNAMIC questions based on current profile
     dynamic_questions = get_dynamic_questions(st.session_state.assistant_profile)
     
     step = st.session_state.assistant_step
     profile = st.session_state.assistant_profile
     total_steps = len(dynamic_questions)
     
-    # ✅ PROFESSIONAL RIGHT-SIDE VERTICAL PROGRESS BAR
-    # Only show when steps are NOT complete
     progress_value = min(step / total_steps, 1.0) if total_steps > 0 else 0
     progress_pct = int(progress_value * 100)
     
-    # Hide progress bar when all steps are complete
     if not st.session_state.assistant_complete and step < total_steps:
         st.markdown(f"""
         <div style="
@@ -652,12 +811,10 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
         </style>
         """, unsafe_allow_html=True)
     
-    # Show conversation history
     for msg in st.session_state.assistant_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
     
-    # --- If profile is complete, show results ---
     if st.session_state.assistant_complete:
         st.info(f"""
         📋 **Your Profile:**
@@ -669,10 +826,8 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
         - Occupation: {profile.get('occupation', 'Not set')}
         """)
         
-        # Search schemes
         if st.button("🔍 Search Schemes Now", type="primary", use_container_width=True, key="search_schemes_btn"):
             with st.spinner("🔍 Searching matching schemes..."):
-                # Age aur Income ko number mein convert karo matching ke liye
                 age_num = extract_number_from_range(profile.get("age"))
                 income_num = extract_number_from_range(profile.get("income"))
                 
@@ -689,11 +844,9 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
                 st.session_state.assistant_results = results
                 st.rerun()
         
-        # Show results
         if st.session_state.assistant_results:
             eligible_count = sum(1 for r in st.session_state.assistant_results if r["eligible"])
             
-            # ✅ FEATURE 3: AI RECOMMENDATION
             with st.spinner("🤖 AI aapke liye recommendation bana raha hai..."):
                 recommendation = generate_ai_recommendation(
                     profile,
@@ -705,23 +858,19 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
             
             st.success(f"✅ Found {len(st.session_state.assistant_results)} schemes ({eligible_count} eligible)")
             
-            # Use passed functions
             if render_scheme_card and sort_results and t:
                 for r in st.session_state.assistant_results[:8]:
                     render_scheme_card(r, t, "assistant", "English")
             else:
                 st.warning("Scheme card rendering functions not provided.")
         
-        # Reset button
         if st.button("🔄 Start Over", use_container_width=True, key="reset_assistant_btn"):
             reset_assistant()
             st.rerun()
         
-        # ✅ Auto-scroll to bottom (results ke baad)
         auto_scroll_to_bottom()
         return
     
-    # --- Not complete - ask next question ---
     if step < total_steps:
         current_q = dynamic_questions[step]
         key = current_q["key"]
@@ -730,7 +879,6 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
         
         assistant_msg = f"📝 **{question}**"
         
-        # Check if already answered
         if key in profile and profile[key] is not None:
             st.chat_message("assistant").markdown(assistant_msg)
             st.chat_message("user").markdown(f"✅ {profile[key]}")
@@ -740,10 +888,8 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
                 st.rerun()
             return
         
-        # Show question
         st.chat_message("assistant").markdown(assistant_msg)
         
-        # Show options as buttons
         if options:
             st.markdown("**Choose from options:**")
             cols = st.columns(min(len(options), 4))
@@ -757,7 +903,6 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
                         st.session_state.assistant_step += 1
                         st.rerun()
             
-            # Manual input
             user_input = st.chat_input("Or type your answer here...", key=f"chat_input_{key}")
             if user_input:
                 st.session_state.assistant_profile[key] = user_input
@@ -774,10 +919,8 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
                 st.session_state.assistant_step += 1
                 st.rerun()
         
-        # ✅ Auto-scroll to bottom (next question ke baad)
         auto_scroll_to_bottom()
     
-    # --- After all questions ---
     if step >= total_steps and not st.session_state.assistant_complete:
         required_keys = ["age", "state", "gender", "social_category", "income", "occupation"]
         all_answered = all(key in profile for key in required_keys)
@@ -785,7 +928,6 @@ def render_profile_mode(df, render_scheme_card, sort_results, t):
         if all_answered:
             st.session_state.assistant_complete = True
             
-            # ✅ FEATURE 5: SAVE PROFILE
             if save_profile_to_user_data(profile):
                 st.toast("✅ Profile saved for next time!")
             
@@ -810,45 +952,34 @@ def render_ai_assistant(render_scheme_card=None, sort_results=None, t=None):
     
     if not GROQ_API_KEY:
         st.warning("⚠️ Groq API key not configured. AI features will be limited.")
+    else:
+        st.caption(f"🤖 Using model: `{DEFAULT_GROQ_MODEL}`")
 
-    # ✅ CSS to increase text size in Assistant mode
+    # ✅ CSS (unchanged from before)
     st.markdown("""
     <style>
-    /* Chat messages text size */
     div[data-testid="stChatMessage"] p,
     div[data-testid="stChatMessage"] li,
     div[data-testid="stChatMessage"] span {
         font-size: 1.05rem !important;
         line-height: 1.6 !important;
     }
-    
-    /* Chat message name (role) */
     div[data-testid="stChatMessage"] .stChatMessageName {
         font-size: 1rem !important;
     }
-    
-    /* Buttons text size */
     .stButton > button {
         font-size: 1rem !important;
         padding: 12px 18px !important;
     }
-    
-    /* Caption / small text */
     .stCaption, small {
         font-size: 0.95rem !important;
     }
-    
-    /* Expander header */
     .streamlit-expanderHeader {
         font-size: 1rem !important;
     }
-    
-    /* Radio buttons text */
     .stRadio label p {
         font-size: 1rem !important;
     }
-    
-    /* Markdown headings inside assistant */
     div[data-testid="stChatMessage"] h1,
     div[data-testid="stChatMessage"] h2,
     div[data-testid="stChatMessage"] h3,
@@ -858,20 +989,27 @@ def render_ai_assistant(render_scheme_card=None, sort_results=None, t=None):
     </style>
     """, unsafe_allow_html=True)
     
+    # ✅ FIX: Heading sirf yahan render hota hai (duplicate nahi)
     st.markdown("### 🤖 AI Sarkari Scheme Assistant")
     st.caption("Apne baare mein batao, main best schemes suggest karunga!")
     
-    # Initialize session state
     init_assistant_state()
     
-    # Load schemes data
     df = load_schemes()
     
-    # ✅ Get current mode from session_state (default: profile)
     if "assistant_mode" not in st.session_state:
         st.session_state.assistant_mode = "profile"
     
     current_mode = st.session_state.assistant_mode
+    
+    # ✅ FIX: Mode switch par stale chat state clear karo
+    if st.session_state._last_assistant_mode != current_mode:
+        if current_mode == "nl":
+            st.session_state.ai_messages = []
+        elif current_mode == "chat":
+            st.session_state.nl_chat_history = []
+            st.session_state.nl_last_schemes = []
+        st.session_state._last_assistant_mode = current_mode
     
     # ✅ RENDER CONTENT BASED ON MODE
     if current_mode == "nl":
@@ -881,10 +1019,9 @@ def render_ai_assistant(render_scheme_card=None, sort_results=None, t=None):
     else:
         render_profile_mode(df, render_scheme_card, sort_results, t)
     
-    # ✅ MODE SELECTOR AT BOTTOM (in expander - modern pattern)
+    # ✅ MODE SELECTOR AT BOTTOM
     st.divider()
     
-    # Show current mode badge
     mode_labels = {
         "profile": "Quick Profile",
         "nl": "Describe Problem",
@@ -913,8 +1050,9 @@ def render_ai_assistant(render_scheme_card=None, sort_results=None, t=None):
             st.session_state.assistant_mode = selected_mode
             st.rerun()
 
+
 # ===========================
-# LEGACY CHATBOT (Fallback)
+# LEGACY CHATBOT (Free-form chat)
 # ===========================
 def get_llm():
     """Returns configured LLM instance."""
@@ -924,7 +1062,7 @@ def get_llm():
         llm = ChatGroq(
             temperature=0.7,
             groq_api_key=GROQ_API_KEY,
-            model_name="llama-3.3-70b-versatile"
+            model_name=DEFAULT_GROQ_MODEL   # ✅ FIX: .env se load
         )
         return llm
     except Exception:
@@ -973,9 +1111,9 @@ def create_conversation():
 
 
 def ai_chatbot_ui():
-    """Legacy AI Chatbot UI (fallback for free-form chat)."""
-    st.markdown("### 🤖 AI Sarkari Scheme Assistant")
-    st.caption("Apni samasya likhein, AI aapki madad karega!")
+    """Legacy AI Chatbot UI (free-form chat)."""
+    # ✅ FIX: Duplicate heading removed — sirf caption rakha
+    st.caption("💬 Free-form chat — schemes suggest karne ke liye 'Describe Your Problem' mode use karein.")
 
     try:
         conversation = create_conversation()
@@ -1007,6 +1145,9 @@ def ai_chatbot_ui():
             with st.chat_message("assistant"):
                 with st.spinner("AI soch raha hai..."):
                     try:
+                        if st.session_state.ai_conversation is None:
+                            raise Exception("AI not configured")
+                        
                         response = st.session_state.ai_conversation.invoke(
                             {"input": user_input},
                             config={"configurable": {"session_id": st.session_state["_ai_session_id"]}}
@@ -1017,17 +1158,38 @@ def ai_chatbot_ui():
                         st.markdown(response_text)
                         st.session_state.ai_messages.append({"role": "assistant", "content": response_text})
                         
-                        # Log for analytics
                         log_assistant_query(user_input, 0)
                     except Exception as e:
-                        error_msg = f"Error: {str(e)}. Kya aapne Groq API key sahi daali hai?"
-                        st.error(error_msg)
-                        st.session_state.ai_messages.append({"role": "assistant", "content": error_msg})
+                        # ✅ FIX: LLM fail hone par rule-based fallback
+                        st.warning("⚠️ AI temporarily unavailable. Rule-based search use kar rahe hain...")
+                        
+                        df = load_schemes()
+                        fallback_results = fallback_search_schemes(user_input, df, top_n=5)
+                        
+                        if fallback_results:
+                            st.success(f"✅ {len(fallback_results)} matching schemes mili:")
+                            for r in fallback_results:
+                                score_pct = int(r.get("score", 0) * 100)
+                                st.markdown(
+                                    f"**{r['scheme_name']}** ({score_pct}% match)  \n"
+                                    f"_{r.get('category_type', '')} • {r.get('applicable_state', '')}_  \n"
+                                    f"{r.get('description', '')[:200]}  \n"
+                                    f"[Apply Here]({r.get('apply_link', '#')})"
+                                )
+                                st.divider()
+                            st.session_state.ai_messages.append({
+                                "role": "assistant",
+                                "content": f"Fallback: {len(fallback_results)} schemes mili"
+                            })
+                        else:
+                            st.info("Koi matching scheme nahi mili. Thoda aur detail mein likhein.")
+                            st.session_state.ai_messages.append({
+                                "role": "assistant",
+                                "content": "Koi matching scheme nahi mili."
+                            })
         
-        # ✅ Auto-scroll to bottom (har chat message ke baad)
         auto_scroll_to_bottom()
         
-        # Reset button
         if st.session_state.ai_messages:
             if st.button("🔄 Start New Chat", use_container_width=True, key="reset_ai_chat"):
                 st.session_state.ai_messages = []

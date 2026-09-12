@@ -1,6 +1,9 @@
 """
-voice_assistant.py - Voice Assistant v14 FINAL (st.audio_input + auto-retry)
+voice_assistant.py - Voice Assistant v15 (model config fix)
 Layout: Top heading → Filters → Results → Fixed bottom bar
+
+FIXES (v15):
+  - GROQ_MODEL_NAME now loaded from .env (fixes 404 deprecation error)
 """
 
 import io
@@ -14,6 +17,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
+
+# ✅ FIX: Load .env early
+load_dotenv()
+
+# ✅ FIX: Model name ab .env se load hota hai — 404 error gone
+DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL_NAME", "llama-3.1-8b-instant")
 
 # --- Language Codes ---
 _GTTS_LANG_CODES = {"English": "en", "हिंदी": "hi", "मराठी": "mr", "தமிழ்": "ta"}
@@ -51,15 +61,13 @@ except Exception:
 def _get_cached_llm():
     try:
         from langchain_groq import ChatGroq
-        from dotenv import load_dotenv
-        load_dotenv()
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
             return None
         return ChatGroq(
             temperature=0.7,
             groq_api_key=api_key,
-            model_name="llama-3.3-70b-versatile"
+            model_name=DEFAULT_GROQ_MODEL   # ✅ FIX: .env se load
         )
     except Exception:
         return None
@@ -356,7 +364,7 @@ If NONE are relevant, return: NONE"""
 
 
 # ===========================
-# CSS — v14 (Error-Proof)
+# CSS — v15
 # ===========================
 def _inject_voice_ui_css():
     st.markdown("""
@@ -513,7 +521,7 @@ def _inject_voice_ui_css():
     }
 
     /* ============================================
-       ✅ STICKY BOTTOM BAR — v14
+       ✅ STICKY BOTTOM BAR
        ============================================ */
     .st-key-sticky_recording_bar {
         position: fixed !important;
@@ -584,7 +592,6 @@ def _inject_voice_ui_css():
         display: none !important;
     }
 
-    /* Pill container */
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"] > div:first-child {
         background: rgba(20, 30, 50, 0.92) !important;
         border: 1px solid rgba(0, 229, 255, 0.3) !important;
@@ -606,14 +613,12 @@ def _inject_voice_ui_css():
         border-color: rgba(0, 229, 255, 0.5) !important;
     }
 
-    /* Recording state */
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"]:has(button[data-testid*="Stop"]) > div:first-child,
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"]:has(audio) > div:first-child {
         border-color: rgba(255, 71, 87, 0.75) !important;
         box-shadow: 0 0 28px rgba(255, 71, 87, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
     }
 
-    /* Mic button */
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"] button {
         background: linear-gradient(135deg, #00E5FF, #A855F7) !important;
         border: none !important;
@@ -638,7 +643,6 @@ def _inject_voice_ui_css():
         box-shadow: 0 0 22px rgba(0, 229, 255, 0.8) !important;
     }
 
-    /* Force SVG visible */
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"] button svg {
         display: block !important;
         visibility: visible !important;
@@ -648,7 +652,6 @@ def _inject_voice_ui_css():
         color: #0b141a !important;
     }
 
-    /* Recording mic */
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"]:has(button[data-testid*="Stop"]) button,
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"]:has(audio) button {
         background: linear-gradient(135deg, #FF4757, #EC4899) !important;
@@ -660,14 +663,10 @@ def _inject_voice_ui_css():
         50% { box-shadow: 0 0 26px rgba(255, 71, 87, 1); }
     }
 
-    /* Hide audio playback */
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"] audio {
         display: none !important;
     }
 
-    /* ============================================
-       ✅ HIDE ERROR MESSAGE — VERY STRONG v14
-       ============================================ */
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"] [role="alert"],
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"] [data-testid*="error"],
     .st-key-sticky_recording_bar div[data-testid="stAudioInput"] [data-testid*="Error"],
@@ -693,9 +692,6 @@ def _inject_voice_ui_css():
         font-size: 0 !important;
     }
 
-    /* ============================================
-       ⚙️ and 🔄 buttons
-       ============================================ */
     .st-key-sticky_recording_bar div[data-testid="column"]:nth-child(2),
     .st-key-sticky_recording_bar div[data-testid="column"]:nth-child(3) {
         flex: 0 0 52px !important;
@@ -739,7 +735,6 @@ def _inject_voice_ui_css():
         outline: none !important;
     }
 
-    /* Mobile */
     @media (max-width: 640px) {
         .st-key-sticky_recording_bar {
             padding: 10px 12px 12px 12px !important;
@@ -840,13 +835,10 @@ def _process_voice_query(voice_query, df, t, lang_choice, search_schemes_fn, sor
 # MAIN RENDER
 # ===========================
 def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_fn, render_scheme_card_fn, history_module):
-    """Voice Assistant v14 — Error-proof with auto-retry."""
+    """Voice Assistant v15 — model config fixed."""
 
     _inject_voice_ui_css()
 
-    # =========================================================
-    # ✅ Session state (v14: added audio_attempt for retry)
-    # =========================================================
     defaults = {
         "voice_transcript": "", "voice_results": [], "voice_filtered_results": [],
         "voice_history": [], "auto_speak": True, "noise_reduction_enabled": False,
@@ -859,6 +851,9 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    # ✅ FIX: Initialize audio_value outside the container (avoid NameError)
+    audio_value = None
 
     if st.session_state.scroll_to_results:
         _scroll_to_results()
@@ -879,7 +874,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
         </div>
         """, unsafe_allow_html=True)
 
-    # HEADING
     st.markdown("""
     <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
         <div style="
@@ -896,7 +890,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
     </div>
     """, unsafe_allow_html=True)
 
-    # FILTERS
     st.markdown('<div class="filters-card"><p class="filters-title">Results Filters</p></div>', unsafe_allow_html=True)
 
     try:
@@ -928,7 +921,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
 
     st.markdown('<div style="margin: 8px 0;"></div>', unsafe_allow_html=True)
 
-    # Action buttons
     if st.session_state.voice_results:
         col1, col2 = st.columns(2)
         with col1:
@@ -951,7 +943,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
                 st.session_state.ready_for_next = False
                 st.rerun()
 
-    # TRANSCRIPT
     if st.session_state.voice_transcript:
         st.markdown(f"""
         <div class="transcript-card">
@@ -960,7 +951,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
         </div>
         """, unsafe_allow_html=True)
 
-    # FOLLOW-UPS
     if (st.session_state.followup_questions and st.session_state.followup_for_query == st.session_state.voice_transcript):
         questions_html = "".join([f'<div class="followup-item">▸ {q}</div>' for q in st.session_state.followup_questions])
         st.markdown(f"""
@@ -974,7 +964,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
                 st.session_state.followup_questions = generate_follow_up_questions(st.session_state.voice_transcript, lang_choice)
                 st.rerun()
 
-    # RESULTS
     display_results = st.session_state.voice_filtered_results or st.session_state.voice_results
 
     if display_results:
@@ -1052,7 +1041,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
     elif st.session_state.voice_transcript:
         st.info("Koi scheme nahi mili. Filters change karein ya alag sawaal poochhein.")
 
-    # HISTORY
     if st.session_state.voice_history:
         with st.expander(f"Voice Search History ({len(st.session_state.voice_history)})", expanded=False):
             for item in reversed(st.session_state.voice_history[-10:]):
@@ -1069,11 +1057,10 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
                 st.session_state.voice_history = []
                 st.rerun()
 
-    # SPACER
     st.markdown('<div style="height: 110px;"></div>', unsafe_allow_html=True)
 
     # =========================================================
-    # STICKY BOTTOM RECORDING BAR — v14 with retry key
+    # STICKY BOTTOM RECORDING BAR
     # =========================================================
     recording_bar = st.container(key="sticky_recording_bar")
 
@@ -1082,7 +1069,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
 
         with rec_col1:
             current_round = st.session_state.get("voice_round", 0)
-            # ✅ FIX: Include audio_attempt in key so widget resets on error
             attempt = st.session_state.get("audio_attempt", 0)
             audio_value = st.audio_input(
                 "🎤 Recording",
@@ -1139,7 +1125,7 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
                 st.rerun()
 
     # =========================================================
-    # PROCESS AUDIO — v14 with auto-retry
+    # PROCESS AUDIO
     # =========================================================
     if audio_value is not None:
         try:
@@ -1147,13 +1133,11 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
             audio_value.seek(0)
             audio_hash = hash(audio_bytes_temp)
         except Exception:
-            # Corrupted audio — reset and try again
             st.session_state.audio_attempt = st.session_state.get("audio_attempt", 0) + 1
             st.session_state.last_audio_hash = None
             audio_hash = None
             audio_bytes_temp = None
 
-        # Skip if same recording already processed
         if audio_hash is not None and audio_hash == st.session_state.last_audio_hash:
             audio_hash = None
 
@@ -1173,17 +1157,14 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn, sort_results_f
                             state_filter, category_filter, occupation_filter,
                             income_filter, only_eligible_filter
                         )
-                    # ✅ Success: reset attempt counter
                     st.session_state.audio_attempt = 0
                     st.rerun()
                 except RuntimeError as e:
-                    # ✅ Voice recognition failed — reset audio input, show warning
                     st.session_state.audio_attempt = st.session_state.get("audio_attempt", 0) + 1
                     st.session_state.last_audio_hash = None
                     st.warning(f"🎤 {str(e)}")
                     st.rerun()
                 except Exception as e:
-                    # ✅ Any unexpected error — reset audio input
                     st.session_state.audio_attempt = st.session_state.get("audio_attempt", 0) + 1
                     st.session_state.last_audio_hash = None
                     st.error(f"⚠️ Voice error. Please try again.")

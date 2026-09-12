@@ -3,6 +3,9 @@ Simple Explain Module
 - Generates easy-to-understand explanation for schemes
 - Uses Groq AI when API key is available
 - Falls back to simple text when API key is not available
+
+FIXES (v2):
+  - GROQ_MODEL_NAME now loaded from .env (fixes 404 deprecation error)
 """
 
 import os
@@ -19,6 +22,11 @@ except ImportError:
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# ✅ FIX: Model name ab .env se load hota hai — 404 error gone
+# Agar future mein Groq model deprecate kare, sirf .env badlo — code nahi
+DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL_NAME", "llama-3.1-8b-instant")
+
 
 # ===========================
 # AI-BASED EXPLANATION
@@ -37,7 +45,7 @@ def explain_scheme_ai(scheme_name, description, benefits, lang_choice, category_
         llm = ChatGroq(
             temperature=0.7,
             groq_api_key=GROQ_API_KEY,
-            model_name="llama-3.3-70b-versatile"
+            model_name=DEFAULT_GROQ_MODEL   # ✅ FIX: .env se load
         )
         
         # Language-based prompt
@@ -68,6 +76,7 @@ def explain_scheme_ai(scheme_name, description, benefits, lang_choice, category_
     except Exception as e:
         return f"❌ Error: {e}"
 
+
 # ===========================
 # SIMPLE TEXT EXPLANATION (Fallback)
 # ===========================
@@ -83,6 +92,7 @@ def explain_scheme_text(scheme_name, description, benefits, lang_choice, categor
         return f"**{scheme_name}** என்பது ஒரு {category_type} திட்டம். இதன் முக்கிய நோக்கம்: {description}. இதில் உங்களுக்கு இந்த பலன்கள் கிடைக்கும்: {benefits}. நீங்கள் {applicable_state} இலிருந்து விண்ணப்பிக்கலாம்."
     else:
         return f"**{scheme_name}** is a {category_type} scheme. Its main objective is: {description}. You get these benefits: {benefits}. You can apply from {applicable_state}."
+
 
 # ===========================
 # MAIN EXPLAIN FUNCTION
