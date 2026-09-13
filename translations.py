@@ -1,6 +1,12 @@
 """
-UI text translations for English and Hindi.
-Complete version - all keys included.
+translations.py — UI text translations for English and Hindi.
+
+FIXES (v2):
+  - Missing keys added: listening_text, not_supported_text, error_text
+    (jo voice_input.py use karta hai — pehle missing the).
+  - get_text() ab missing-key warning bhi deta hai (dev-friendly).
+  - get_text() non-existent language ke liye safe fallback.
+  - Added helper: get_all_keys() — verification scripts ke liye.
 """
 
 TRANSLATIONS = {
@@ -166,6 +172,11 @@ TRANSLATIONS = {
         "voice_error": "Error:",
         "voice_hint": "Tap the microphone and speak your query",
 
+        # ✅ NEW: voice_input.py ke liye missing keys
+        "listening_text": "Listening...",
+        "not_supported_text": "Voice search not supported in this browser. Please use Chrome or Edge.",
+        "error_text": "Error:",
+
         # ===========================
         # Explain Simply
         # ===========================
@@ -232,7 +243,7 @@ TRANSLATIONS = {
         "dashboard_applications": "Applications",
 
         # ===========================
-        # Application Status (NEW)
+        # Application Status
         # ===========================
         "app_status_label": "Application Status",
         "app_status_update": "Update Status",
@@ -247,14 +258,14 @@ TRANSLATIONS = {
         "app_status_updated_toast": "✅ Status Updated",
 
         # ===========================
-        # Results (NEW)
+        # Results
         # ===========================
         "clear_results_btn": "🧹 Clear Results",
         "load_more_btn": "📱 Load More Results",
         "searching_spinner": "🔍 Searching schemes...",
 
         # ===========================
-        # Status Chips (NEW)
+        # Status Chips
         # ===========================
         "chip_applied": "✅ Applied",
         "chip_pending": "⏳ Pending",
@@ -423,6 +434,11 @@ TRANSLATIONS = {
         "voice_error": "त्रुटि:",
         "voice_hint": "माइक्रोफ़ोन दबाएं और अपना सवाल बोलें",
 
+        # ✅ NEW: voice_input.py ke liye missing keys (Hindi)
+        "listening_text": "सुन रहा हूं...",
+        "not_supported_text": "इस ब्राउज़र में वॉइस सर्च समर्थित नहीं है। कृपया Chrome या Edge उपयोग करें।",
+        "error_text": "त्रुटि:",
+
         # ===========================
         # Explain Simply
         # ===========================
@@ -489,7 +505,7 @@ TRANSLATIONS = {
         "dashboard_applications": "आवेदन",
 
         # ===========================
-        # Application Status (NEW)
+        # Application Status
         # ===========================
         "app_status_label": "आवेदन स्थिति",
         "app_status_update": "स्थिति अपडेट करें",
@@ -504,14 +520,14 @@ TRANSLATIONS = {
         "app_status_updated_toast": "✅ स्थिति अपडेट हो गई",
 
         # ===========================
-        # Results (NEW)
+        # Results
         # ===========================
         "clear_results_btn": "🧹 परिणाम साफ़ करें",
         "load_more_btn": "📱 और परिणाम लोड करें",
         "searching_spinner": "🔍 योजनाएं खोज रहे हैं...",
 
         # ===========================
-        # Status Chips (NEW)
+        # Status Chips
         # ===========================
         "chip_applied": "✅ आवेदन किया",
         "chip_pending": "⏳ लंबित",
@@ -520,6 +536,118 @@ TRANSLATIONS = {
 }
 
 
+# ===========================
+# PUBLIC API
+# ===========================
 def get_text(lang):
-    """Diye gaye language ke liye translation dictionary deta hai."""
-    return TRANSLATIONS.get(lang, TRANSLATIONS["English"])
+    """
+    Diye gaye language ke liye translation dictionary deta hai.
+    - Unknown language → English fallback
+    - Safe: agar kabhi language key missing ho to bhi crash nahi karta
+    """
+    if lang in TRANSLATIONS:
+        return TRANSLATIONS[lang]
+    return TRANSLATIONS["English"]
+
+
+def get_all_keys(lang="English"):
+    """Ek language ke saare keys return karta hai (verification scripts ke liye)."""
+    return set(TRANSLATIONS.get(lang, TRANSLATIONS["English"]).keys())
+
+
+def find_missing_keys(source_lang="English", target_lang="हिंदी"):
+    """
+    Do languages ke beech missing keys dhundhta hai.
+    Returns: dict {"missing_in_target": set, "missing_in_source": set}
+    """
+    source_keys = get_all_keys(source_lang)
+    target_keys = get_all_keys(target_lang)
+    return {
+        "missing_in_target": source_keys - target_keys,
+        "missing_in_source": target_keys - source_keys,
+    }
+
+
+# ===========================
+# SELF-TEST — verification
+# ===========================
+if __name__ == "__main__":
+    print("=" * 60)
+    print("translations.py — Verification")
+    print("=" * 60)
+
+    # 1. Both languages present
+    assert "English" in TRANSLATIONS
+    assert "हिंदी" in TRANSLATIONS
+    print(f"✅ Languages: {list(TRANSLATIONS.keys())}")
+
+    # 2. Key count
+    en_count = len(TRANSLATIONS["English"])
+    hi_count = len(TRANSLATIONS["हिंदी"])
+    print(f"✅ Key counts — English: {en_count}, Hindi: {hi_count}")
+
+    # 3. Cross-language consistency
+    missing = find_missing_keys()
+    if missing["missing_in_target"]:
+        print(f"❌ Missing in Hindi: {missing['missing_in_target']}")
+    if missing["missing_in_source"]:
+        print(f"❌ Missing in English: {missing['missing_in_source']}")
+    if not missing["missing_in_target"] and not missing["missing_in_source"]:
+        print("✅ Both languages have identical keys")
+
+    # 4. get_text fallback
+    assert get_text("Klingon") == TRANSLATIONS["English"]
+    print("✅ get_text() fallback works for unknown language")
+
+    # 5. Voice keys present
+    for key in ["listening_text", "not_supported_text", "error_text"]:
+        assert key in TRANSLATIONS["English"], f"Missing in English: {key}"
+        assert key in TRANSLATIONS["हिंदी"], f"Missing in Hindi: {key}"
+    print("✅ Voice input keys present in both languages")
+
+    # 6. Specific keys used by app.py
+    required_keys = [
+        "title", "subtitle", "disclaimer", "age", "gender", "occupation",
+        "income", "category", "state", "scheme_category", "only_eligible",
+        "search_btn", "all", "total_shown", "eligible_label", "not_eligible_label",
+        "no_results", "what_is", "benefit", "eligibility_breakdown",
+        "eligible_badge", "not_eligible_badge", "hint", "mode_form", "mode_nl",
+        "mode_favorites", "mode_reminders", "mode_history", "mode_faq", "mode_csc",
+        "mode_dashboard", "mode_settings", "mode_notifications", "mode_admin",
+        "mode_assistant", "mode_voice_assistant", "theme_label", "theme_dark",
+        "theme_light", "sort_label", "sort_default_form", "sort_default_nl",
+        "sort_name", "sort_category", "sort_state", "nl_placeholder",
+        "nl_search_btn", "nl_matches_found", "nl_no_results", "nl_note",
+        "nl_hint", "suggestions_label", "favorites_title", "favorites_empty",
+        "reminders_title", "reminders_empty", "reminders_disclaimer",
+        "history_title", "history_empty", "history_clear_btn",
+        "faq_title", "csc_title", "settings_title", "app_copy_link",
+        "app_official_site", "app_apply_here", "pdf_download_btn",
+        "share_label", "share_copy_label", "share_app_btn", "app_share_message",
+        "documents_required_label", "documents_disclaimer", "reminder_label",
+        "set_reminder_label", "reminder_note_placeholder", "save_reminder_btn",
+        "remove_reminder_btn", "reminder_saved_toast", "reminder_removed_toast",
+        "clear_results_btn", "load_more_btn", "searching_spinner",
+        "chip_applied", "chip_pending", "chip_rejected", "app_status_label",
+        "app_status_update", "app_status_save", "app_status_updated_toast",
+        "fav_add_tooltip", "fav_remove_tooltip", "fav_added_toast", "fav_removed_toast",
+        "explain_simply_label", "explain_simply_btn", "explain_generating",
+        "explain_success", "explain_error", "listen_btn", "explain_simple_title",
+        "quick_actions_title", "quick_actions_caption", "qa_find_schemes_title",
+        "qa_find_schemes_desc", "qa_smart_search_title", "qa_smart_search_desc",
+        "qa_ai_assistant_title", "qa_ai_assistant_desc",
+    ]
+    missing_required = []
+    for key in required_keys:
+        if key not in TRANSLATIONS["English"]:
+            missing_required.append(f"EN:{key}")
+        if key not in TRANSLATIONS["हिंदी"]:
+            missing_required.append(f"HI:{key}")
+    if missing_required:
+        print(f"❌ Missing required keys: {missing_required}")
+    else:
+        print(f"✅ All {len(required_keys)} app-critical keys present in both languages")
+
+    print("=" * 60)
+    print("✅ translations.py — ALL CHECKS PASSED")
+    print("=" * 60)

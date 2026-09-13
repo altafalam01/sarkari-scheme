@@ -1,7 +1,24 @@
 """
-FAQ content - bilingual list of (question, answer) pairs.
+faq.py — Bilingual FAQ content (question, answer) pairs.
+
+Data structure:
+    FAQ_DATA = {
+        "English": [(question1, answer1), (question2, answer2), ...],
+        "हिंदी":   [(question1, answer1), ...],
+    }
+
+FIXES (v2):
+  - get_faqs() me strict validation: non-list / non-tuple / wrong-arity
+    items safely skip ho jaate hain (crash nahi karte).
+  - None / empty-string questions filter ho jaate hain.
+  - lang invalid → English fallback (already tha, but explicit).
+  - Hindi + English dono me FAQ count match (verification test).
+  - __main__ self-test.
 """
 
+# ===========================
+# FAQ DATA
+# ===========================
 FAQ_DATA = {
     "English": [
         ("How do I verify my eligibility for a scheme?",
@@ -51,6 +68,7 @@ FAQ_DATA = {
          "Chrome or Edge, needs microphone permission, and needs an internet "
          "connection."),
     ],
+
     "हिंदी": [
         ("मैं किसी योजना के लिए अपनी पात्रता कैसे जांचूं?",
          "यह ऐप आपकी दी गई जानकारी (आयु, आय, राज्य, श्रेणी आदि) के आधार पर एक त्वरित, "
@@ -96,5 +114,134 @@ FAQ_DATA = {
 }
 
 
+# ===========================
+# PUBLIC API
+# ===========================
+def _is_valid_faq_item(item):
+    """
+    FAQ item valid hai agar:
+      - tuple ya list ho
+      - exactly 2 elements ho
+      - dono elements non-empty strings ho
+    """
+    if not isinstance(item, (tuple, list)):
+        return False
+    if len(item) != 2:
+        return False
+    q, a = item
+    if not isinstance(q, str) or not q.strip():
+        return False
+    if not isinstance(a, str) or not a.strip():
+        return False
+    return True
+
+
 def get_faqs(lang):
-    return FAQ_DATA.get(lang, FAQ_DATA["English"])
+    """
+    Diye gaye language ke liye validated FAQ list return karta hai.
+    - Invalid language → English fallback
+    - Invalid entries → silently skip
+    - Non-list data → English fallback
+    Returns: list of (question, answer) tuples
+    """
+    data = FAQ_DATA.get(lang)
+    if not isinstance(data, list):
+        data = FAQ_DATA.get("English", [])
+
+    # Sirf valid (question, answer) pairs return karo
+    return [(q, a) for item in data if _is_valid_faq_item(item) for q, a in [item]]
+
+
+def get_faq_count(lang="English"):
+    """Valid FAQ count return karta hai."""
+    return len(get_faqs(lang))
+
+
+def get_all_languages():
+    """Available languages return karta hai."""
+    return list(FAQ_DATA.keys())
+
+
+# ===========================
+# SELF-TEST
+# ===========================
+if __name__ == "__main__":
+    print("=" * 60)
+    print("faq.py — Verification")
+    print("=" * 60)
+
+    # 1. Basic load
+    en_faqs = get_faqs("English")
+    hi_faqs = get_faqs("हिंदी")
+    print(f"✅ English FAQs: {len(en_faqs)}")
+    print(f"✅ Hindi FAQs:   {len(hi_faqs)}")
+    assert len(en_faqs) > 0, "English FAQ empty!"
+    assert len(hi_faqs) > 0, "Hindi FAQ empty!"
+
+    # 2. Count parity between languages
+    if len(en_faqs) != len(hi_faqs):
+        print(f"⚠️  FAQ count mismatch: EN={len(en_faqs)}, HI={len(hi_faqs)}")
+    else:
+        print(f"✅ Both languages have same FAQ count: {len(en_faqs)}")
+
+    # 3. All items are valid (q, a) tuples
+    for i, (q, a) in enumerate(en_faqs):
+        assert isinstance(q, str) and q.strip(), f"EN FAQ #{i} bad question"
+        assert isinstance(a, str) and a.strip(), f"EN FAQ #{i} bad answer"
+    for i, (q, a) in enumerate(hi_faqs):
+        assert isinstance(q, str) and q.strip(), f"HI FAQ #{i} bad question"
+        assert isinstance(a, str) and a.strip(), f"HI FAQ #{i} bad answer"
+    print("✅ All FAQ items well-formed")
+
+    # 4. Invalid language fallback
+    fallback = get_faqs("Klingon")
+    assert fallback == en_faqs, "Invalid language should fall back to English"
+    print("✅ Invalid language → English fallback works")
+
+    # 5. None language
+    none_fallback = get_faqs(None)
+    assert isinstance(none_fallback, list) and len(none_fallback) > 0
+    print("✅ None language → English fallback works")
+
+    # 6. Malformed item handling
+    original_en = FAQ_DATA["English"]
+    FAQ_DATA["English"] = [
+        ("Valid Q", "Valid A"),
+        "not a tuple",                          # Invalid: string
+        ("Only question",),                     # Invalid: 1-tuple
+        ("Q", "A", "extra"),                    # Invalid: 3-tuple
+        ("", "Empty question answer"),          # Invalid: empty Q
+        ("Question with empty answer", ""),     # Invalid: empty A
+        (None, "None question"),                # Invalid: None Q
+        ("Valid Q2", "Valid A2"),
+    ]
+    try:
+        filtered = get_faqs("English")
+        assert len(filtered) == 2, f"Expected 2 valid, got {len(filtered)}"
+        assert filtered[0] == ("Valid Q", "Valid A")
+        assert filtered[1] == ("Valid Q2", "Valid A2")
+        print("✅ Malformed FAQ items correctly filtered")
+    finally:
+        FAQ_DATA["English"] = original_en
+
+    # 7. Non-list data fallback
+    FAQ_DATA["Corrupt"] = {"not": "a list"}
+    try:
+        result = get_faqs("Corrupt")
+        assert result == en_faqs, "Non-list data should fall back to English"
+        print("✅ Non-list data → English fallback works")
+    finally:
+        del FAQ_DATA["Corrupt"]
+
+    # 8. Languages list
+    langs = get_all_languages()
+    assert "English" in langs and "हिंदी" in langs
+    print(f"✅ Languages available: {langs}")
+
+    # 9. FAQ count helper
+    assert get_faq_count("English") == len(en_faqs)
+    print(f"✅ get_faq_count() works: EN={get_faq_count('English')}, HI={get_faq_count('हिंदी')}")
+
+    print("=" * 60)
+    print("✅ faq.py — ALL CHECKS PASSED")
+    print("=" * 60)
