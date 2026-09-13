@@ -1,7 +1,23 @@
 """
-nl_search.py — Natural language scheme search (v6).
+nl_search.py — Natural language scheme search (v7).
 
-Char n-gram TF-IDF + synonym expansion + keyword boost.
+Char n-gram TF-IDF + synonym expansion + keyword boost + state-aware scoring.
+
+FIXES (v7):
+  - BUG: `applicable_state` was NEVER part of the searchable text, so the
+    engine had zero awareness of geography — a query like "Madhya Pradesh
+    ke kisano ke liye scheme" scored every farmer scheme (any state)
+    almost identically, and whichever had marginally more text overlap
+    won (root cause of wrong-state schemes like a UP scheme showing up
+    for an MP query). Two independent fixes added:
+      1. `_scheme_text()` now appends the scheme's `applicable_state`.
+      2. `search_schemes()` detects an Indian state named in the query
+         and applies an explicit boost to same-state/"All" schemes and
+         a heavy penalty to schemes tied to a *different* specific state
+         — char-ngram similarity alone isn't trusted for this, since
+         "Madhya Pradesh"/"Uttar Pradesh"/"Himachal Pradesh" all share
+         the substring "Pradesh" and would otherwise still get partial
+         credit for each other.
 
 FIXES (v6):
   - SYNONYMS me "Welfare" ka "marriage/shaadi" galat placement fix —
@@ -21,6 +37,7 @@ FIXES (v6):
 """
 
 import re
+import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -269,6 +286,60 @@ HIGH_PRIORITY_KEYWORDS = {
 
 
 # ===========================
+# STATE DETECTION (v7 — fixes wrong-state matches)
+# ===========================
+# Maps aliases/abbreviations (English + Hindi + Hinglish) → canonical state
+# name as it's expected to appear in schemes.csv's `applicable_state` column.
+_INDIAN_STATE_ALIASES = {
+    "andhra pradesh": "Andhra Pradesh", "ap": "Andhra Pradesh",
+    "arunachal pradesh": "Arunachal Pradesh",
+    "assam": "Assam", "असम": "Assam",
+    "bihar": "Bihar", "बिहार": "Bihar",
+    "chhattisgarh": "Chhattisgarh", "chattisgarh": "Chhattisgarh", "छत्तीसगढ़": "Chhattisgarh",
+    "goa": "Goa", "गोवा": "Goa",
+    "gujarat": "Gujarat", "गुजरात": "Gujarat",
+    "haryana": "Haryana", "हरियाणा": "Haryana",
+    "himachal pradesh": "Himachal Pradesh", "hp": "Himachal Pradesh", "हिमाचल प्रदेश": "Himachal Pradesh",
+    "jharkhand": "Jharkhand", "झारखंड": "Jharkhand",
+    "karnataka": "Karnataka", "कर्नाटक": "Karnataka",
+    "kerala": "Kerala", "केरल": "Kerala",
+    "madhya pradesh": "Madhya Pradesh", "mp": "Madhya Pradesh",
+    "म प्र": "Madhya Pradesh", "मध्य प्रदेश": "Madhya Pradesh", "मध्यप्रदेश": "Madhya Pradesh",
+    "maharashtra": "Maharashtra", "महाराष्ट्र": "Maharashtra",
+    "manipur": "Manipur", "meghalaya": "Meghalaya", "mizoram": "Mizoram", "nagaland": "Nagaland",
+    "odisha": "Odisha", "orissa": "Odisha", "ओडिशा": "Odisha",
+    "punjab": "Punjab", "पंजाब": "Punjab",
+    "rajasthan": "Rajasthan", "राजस्थान": "Rajasthan",
+    "sikkim": "Sikkim",
+    "tamil nadu": "Tamil Nadu", "tamilnadu": "Tamil Nadu", "தமிழ்நாடு": "Tamil Nadu",
+    "telangana": "Telangana", "tripura": "Tripura",
+    "uttar pradesh": "Uttar Pradesh", "up": "Uttar Pradesh",
+    "उत्तर प्रदेश": "Uttar Pradesh", "उत्तरप्रदेश": "Uttar Pradesh",
+    "uttarakhand": "Uttarakhand", "uttaranchal": "Uttarakhand",
+    "west bengal": "West Bengal", "wb": "West Bengal", "bengal": "West Bengal",
+    "delhi": "Delhi", "new delhi": "Delhi", "दिल्ली": "Delhi",
+    "jammu and kashmir": "Jammu and Kashmir", "jammu & kashmir": "Jammu and Kashmir", "j&k": "Jammu and Kashmir",
+    "ladakh": "Ladakh",
+    "puducherry": "Puducherry", "pondicherry": "Puducherry",
+    "chandigarh": "Chandigarh",
+}
+# Longest aliases first so "himachal pradesh" is checked before a stray "up".
+_STATE_ALIAS_KEYS_SORTED = sorted(_INDIAN_STATE_ALIASES.keys(), key=len, reverse=True)
+
+
+def _detect_state_in_query(query):
+    """v7: detect an Indian state/UT mentioned anywhere in the query text."""
+    if not query:
+        return None
+    lowered = f" {query.lower()} "
+    for alias in _STATE_ALIAS_KEYS_SORTED:
+        pattern = r"(?<![a-z\u0900-\u097F])" + re.escape(alias) + r"(?![a-z\u0900-\u097F])"
+        if re.search(pattern, lowered):
+            return _INDIAN_STATE_ALIASES[alias]
+    return None
+
+
+# ===========================
 # SCHEME TEXT BUILDER
 # ===========================
 def _safe_str(value, default=""):
@@ -293,8 +364,10 @@ def _scheme_text(row):
     category = _safe_str(row.get("category_type", ""))
     description = _safe_str(row.get("description", ""))
     benefits = _safe_str(row.get("benefits", ""))
+    # v7 FIX: state was missing from the searchable text entirely.
+    state = _safe_str(row.get("applicable_state", ""))
 
-    base = f"{scheme_name} {category} {description} {benefits}"
+    base = f"{scheme_name} {category} {description} {benefits} {state}"
 
     # Category-specific synonyms append karo
     extra_words = SYNONYMS.get(category, [])
@@ -307,6 +380,42 @@ def _scheme_text(row):
 def _build_corpus(df):
     """Saare schemes ka corpus list banata hai."""
     return [_scheme_text(row) for _, row in df.iterrows()]
+
+
+# ===========================
+# CACHED TF-IDF INDEX
+# ===========================
+# PERFORMANCE FIX: Pehle search_schemes() har call par (yaani har keystroke/
+# search click par, kyunki Streamlit har interaction par poora script
+# re-run karta hai) poore corpus par ek naya TfidfVectorizer fit karta tha.
+# Char n-grams (3-5) ke saath ye bahut expensive hota hai aur app ko
+# laggy bana deta tha.
+#
+# Ab vectorizer + matrix sirf ek baar per `df` fit hote hain aur
+# st.cache_resource me cache ho jaate hain (ML-model jaisi cheezon ke
+# liye yahi recommended cache hai). Har search call par sirf naye query
+# ka transform() hota hai — jo bahut sasta operation hai. Cosine
+# similarity ke result par iska koi asar nahi padta: query ke wo
+# character n-grams jo corpus me kahin bhi nahi hain, unka corpus
+# vectors me weight pehle bhi 0 hi tha.
+@st.cache_resource(show_spinner=False)
+def _get_or_build_tfidf_index(df):
+    """Returns (vectorizer, tfidf_matrix, corpus) fit once per dataset, cached."""
+    corpus = _build_corpus(df)
+    if not corpus or all(not c.strip() for c in corpus):
+        return None, None, None
+    try:
+        vectorizer = TfidfVectorizer(
+            analyzer="char_wb",
+            ngram_range=(3, 5),
+            min_df=1,
+            lowercase=True,
+        )
+        matrix = vectorizer.fit_transform(corpus)
+    except ValueError:
+        # Empty vocabulary (agar saara text sirf punctuation ho)
+        return None, None, None
+    return vectorizer, matrix, corpus
 
 
 # ===========================
@@ -385,30 +494,24 @@ def search_schemes(df, query, top_n=8, min_score=0.03):
     if not query or not query.strip():
         return []
 
-    # Corpus build
-    corpus = _build_corpus(df)
-
-    # Agar corpus khaali hai to kuch nahi
-    if not corpus or all(not c.strip() for c in corpus):
+    # PERFORMANCE FIX: vectorizer/matrix ab cached hain (per df), sirf
+    # query ka transform() yahan hota hai — poora corpus refit nahi hota.
+    vectorizer, scheme_vectors, corpus = _get_or_build_tfidf_index(df)
+    if vectorizer is None:
         return []
 
-    # TF-IDF vectorize (char n-gram — typo tolerance ke liye)
     try:
-        vectorizer = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(3, 5),
-            min_df=1,
-            lowercase=True,
-        )
-        tfidf_matrix = vectorizer.fit_transform(corpus + [query])
+        query_vector = vectorizer.transform([query])
     except ValueError:
-        # Empty vocabulary (agar saara text sirf punctuation ho)
         return []
-
-    query_vector = tfidf_matrix[-1]
-    scheme_vectors = tfidf_matrix[:-1]
 
     scores = cosine_similarity(query_vector, scheme_vectors).flatten()
+
+    # v7 FIX: detect a specific state mentioned in the query once, up front.
+    # Char n-grams alone can't be trusted for this — "Madhya Pradesh" and
+    # "Uttar Pradesh" share the substring "Pradesh" and would otherwise get
+    # partial credit for each other's schemes.
+    detected_state = _detect_state_in_query(query)
 
     results = []
     for idx, base_score in enumerate(scores):
@@ -419,6 +522,18 @@ def search_schemes(df, query, top_n=8, min_score=0.03):
         keyword_b = _keyword_boost(query, corpus[idx])
 
         final_score = min(base_score + prefix_b + keyword_b, 1.0)
+
+        # v7 FIX: explicit state boost/penalty — a specific-state query
+        # should strongly prefer that state's schemes (or state-agnostic
+        # "All" ones) and strongly demote schemes tied to a *different*
+        # specific state, regardless of incidental text overlap.
+        if detected_state:
+            row_state = _safe_str(df.iloc[idx].get("applicable_state", ""))
+            if row_state and row_state != "All":
+                if row_state.lower() == detected_state.lower():
+                    final_score = min(final_score + 0.3, 1.0)
+                else:
+                    final_score *= 0.15
 
         # FIX: min_score ab meaningful hai kyunki boost capped hai
         if final_score >= min_score:
@@ -442,10 +557,16 @@ def search_schemes(df, query, top_n=8, min_score=0.03):
 # ===========================
 # VOCABULARY & SUGGESTIONS
 # ===========================
+@st.cache_data(show_spinner=False)
 def build_vocabulary(df):
     """
     Autocomplete suggestions ke liye vocabulary banata hai.
     Scheme names + category types + synonym keywords include karta hai.
+
+    PERFORMANCE FIX: Pehle ye function app.py se har rerun par (yaani
+    NL search page par har interaction par) uncached call hota tha,
+    poore dataframe ko .iterrows() se loop karke. Ab @st.cache_data
+    se cache hai — sirf tab dobara chalega jab `df` khud badlega.
     """
     vocab = set()
 
@@ -587,6 +708,26 @@ if __name__ == "__main__":
         )
         status = "✅" if has_marriage or len(results) == 0 else "⚠️"
         print(f"  {status} '{q}' → {len(results)} results")
+
+    # Test 2b: State-aware ranking (v7 regression test — the original bug)
+    print("\n[Test 2b] v7 — state query should not surface a different state's scheme:")
+    state_df = pd.DataFrame([
+        {"scheme_name": "UP Kisan Uday Yojana", "category_type": "Agriculture",
+         "applicable_state": "Uttar Pradesh", "description": "Support for farmers in UP",
+         "benefits": "Input subsidy", "apply_link": "https://x.gov.in", "deadline": ""},
+        {"scheme_name": "MP Kisan Kalyan Yojana", "category_type": "Agriculture",
+         "applicable_state": "Madhya Pradesh", "description": "Support for farmers in MP",
+         "benefits": "Input subsidy", "apply_link": "https://x.gov.in", "deadline": ""},
+        {"scheme_name": "PM Kisan Samman Nidhi", "category_type": "Agriculture",
+         "applicable_state": "All", "description": "National income support for farmers",
+         "benefits": "Rs 6000/year", "apply_link": "https://x.gov.in", "deadline": ""},
+    ])
+    res = search_schemes(state_df, "Madhya Pradesh mein kisano ke liye scheme", top_n=5)
+    names = [r["scheme_name"] for r in res]
+    assert names, "Expected at least one result"
+    assert names[0] != "UP Kisan Uday Yojana", f"Wrong-state scheme ranked first: {names}"
+    assert "MP Kisan Kalyan Yojana" in names[:1] or "MP Kisan Kalyan Yojana" == names[0]
+    print(f"  ✅ Top result for MP query: '{names[0]}' (full ranking: {names})")
 
     # Test 3: Boost is capped
     print("\n[Test 3] Keyword boost is capped (max 0.25):")
