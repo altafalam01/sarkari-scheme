@@ -1,32 +1,18 @@
-# .streamlit/config.toml
 # ===========================
-# Streamlit App Configuration
+# Streamlit Secrets Configuration
 # ===========================
-# NOTE:
-#   - Ye file Streamlit Cloud ke liye safe hai (no [server] section)
-#   - Sirf [theme] aur [logger] sections use ho rahe hain
-#   - [server] section yahan NAHI hona chahiye (cloud par crash karta hai)
+# Ye file .streamlit/secrets.toml mein rakhi jaati hai.
+# Aapki .env file ke same values yahan daal do taaki Streamlit
+# "No secrets found" warning na dikhaye.
 
-[theme]
-# Base theme — dark rakho (light mode theme toggle se handle hota hai)
-base = "dark"
+# Admin Panel password (for admin authentication)
+ADMIN_PASSWORD = "Altaf@123"
 
-# Primary accent color (buttons, links, sliders, focus rings)
-# themes.py mein custom color override karta hai; ye fallback hai
-primaryColor = "#00E5FF"
+# Groq API Key (for AI features — chatbot, simple explain, voice assistant)
+GROQ_API_KEY = "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"
 
-# Background colors — themes.py ke C['app_bg'] aur C['card_bg'] se match
-backgroundColor = "#0E1117"
-secondaryBackgroundColor = "#1C2333"
+# Groq Model Name
+GROQ_MODEL_NAME = "openai/gpt-oss-20b"
 
-# Text color
-textColor = "#FAFAFA"
-
-# Font
-font = "sans serif"
-
-
-[logger]
-# Logger level — "debug", "info", "warning", "error", "critical"
-# "error" rakho taki tornado WebSocket noise terminal mein na dikhe
-level = "error"
+# App URL (used for share links)
+APP_URL = "http://localhost:8501"
