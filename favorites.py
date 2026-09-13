@@ -7,21 +7,28 @@ FIXES (v2):
   - Atomic write (temp file + os.replace) — partial write se file corrupt nahi hoti.
   - Non-string scheme names filter ho jaate hain.
   - Real data ke saath test nahi karta __main__ me.
+
+PERFORMANCE (v3):
+  - load_favorites() ab @st.cache_data se cached hai (2 sec TTL).
+  - Ye OneDrive ki slow I/O problem solve karta hai.
+  - Har save ke baad cache automatically clear ho jaata hai.
 """
 
 import json
 import os
 import tempfile
+import streamlit as st
 
 FAV_FILE = os.path.join("data", "favorites.json")
 
 
 # ===========================
-# SAFE LOAD
+# SAFE LOAD (CACHED)
 # ===========================
+@st.cache_data(ttl=2, show_spinner=False)
 def load_favorites():
     """
-    Favorites list load karta hai.
+    Favorites list load karta hai (cached for 2 seconds).
     - File missing → []
     - Corrupt JSON → []  (crash nahi karta, purana data move ho jaata hai)
     - Non-list content → []
@@ -68,11 +75,14 @@ def _save_favorites(favs):
     Favorites list ko JSON file me atomically save karta hai.
     - Directory auto-create
     - Temp file me likh ke os.replace (atomic on POSIX/Windows)
+    - Cache clear karta hai taaki next read fresh ho
     """
-    os.makedirs(os.path.dirname(FAV_FILE), exist_ok=True)
+    parent_dir = os.path.dirname(FAV_FILE)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
 
     # Temp file usi directory me banao (os.replace cross-device fail hota hai)
-    dir_path = os.path.dirname(FAV_FILE) or "."
+    dir_path = parent_dir or "."
     fd, tmp_path = tempfile.mkstemp(prefix=".fav_", suffix=".tmp", dir=dir_path)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -86,6 +96,9 @@ def _save_favorites(favs):
         except OSError:
             pass
         raise
+
+    # ✅ Cache clear karo taaki next read fresh ho
+    load_favorites.clear()
 
 
 # ===========================
@@ -163,6 +176,9 @@ if __name__ == "__main__":
     # Module-level constant patch
     globals()["FAV_FILE"] = test_file
 
+    # ✅ Cache clear karo taaki purana data affect na kare
+    load_favorites.clear()
+
     try:
         print("Initial favorites:", load_favorites())
         assert load_favorites() == []
@@ -176,6 +192,7 @@ if __name__ == "__main__":
         # Corrupt file test
         with open(test_file, "w") as f:
             f.write("NOT VALID JSON {{{")
+        load_favorites.clear()  # ✅ Cache clear before corrupt read test
         print("After corrupt write, load_favorites():", load_favorites())
         assert load_favorites() == []
 
@@ -195,4 +212,5 @@ if __name__ == "__main__":
         print("\n✅ All favorites.py tests passed")
     finally:
         globals()["FAV_FILE"] = original_file
+        load_favorites.clear()  # ✅ Final cache clear
         shutil.rmtree(test_dir, ignore_errors=True)

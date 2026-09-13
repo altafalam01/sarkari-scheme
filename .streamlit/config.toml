@@ -1,5 +1,32 @@
+# .streamlit/config.toml
+# ===========================
+# Streamlit App Configuration
+# ===========================
+# NOTE:
+#   - Ye file Streamlit Cloud ke liye safe hai (no [server] section)
+#   - Sirf [theme] aur [logger] sections use ho rahe hain
+#   - [server] section yahan NAHI hona chahiye (cloud par crash karta hai)
+
 [theme]
+# Base theme — dark rakho (light mode theme toggle se handle hota hai)
 base = "dark"
+
+# Primary accent color (buttons, links, sliders, focus rings)
+# themes.py mein custom color override karta hai; ye fallback hai
 primaryColor = "#00E5FF"
+
+# Background colors — themes.py ke C['app_bg'] aur C['card_bg'] se match
 backgroundColor = "#0E1117"
 secondaryBackgroundColor = "#1C2333"
+
+# Text color
+textColor = "#FAFAFA"
+
+# Font
+font = "sans serif"
+
+
+[logger]
+# Logger level — "debug", "info", "warning", "error", "critical"
+# "error" rakho taki tornado WebSocket noise terminal mein na dikhe
+level = "error"

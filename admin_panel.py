@@ -7,7 +7,18 @@ Features:
   - Backup file (schemes_original_backup.csv) auto-created on first load
   - Reset-to-original-data feature (with confirmation)
 
-FIXES (v3):
+FIXES (v4):
+  - CRITICAL: `_render_reset_button()` mein `st.rerun()` ko try/except ke
+    bahar nikaala. Pehle wahi pattern tha jo Explain Simply mein hang kara
+    raha tha — st.rerun() ek special exception raise karta hai jise
+    `except Exception` kuch Streamlit versions mein swallow kar leta hai,
+    isliye reset ke baad page reload nahi hota tha.
+  - `_load_schemes_fresh()` se `_clear_schemes_cache()` call hataayi —
+    ye har admin panel render pe cache clear kar deta tha, jisse cache ka
+    fayda hi nahi milta tha. Ab cache clear sirf `save_schemes_data()`
+    mein hoti hai (jab data actually change hua ho).
+
+FIXES (v3, inherited):
   - All st.success + st.rerun() combos replaced with st.toast() — success
     messages ab user ko dikhte hain (pehle wipe ho jaate the).
   - ADMIN_PASSWORD fallback "altaf123" REMOVED — ab None return hota hai
@@ -30,8 +41,11 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv  # <-- ADD THIS
 
 from web_scraper import render_web_scraper_ui
+
+load_dotenv()  
 
 
 # ===========================
@@ -207,6 +221,10 @@ def save_schemes_data(df):
     """
     Schemes CSV save karta hai + cache clear karta hai.
     Cache clear fail ho to admin ko explicit toast warning.
+
+    NOTE: Ye function hi WAHI JAGAH hai jahan cache clear honi chahiye —
+    jab data actually change hua ho. Read-only operations ke liye
+    `_load_schemes_fresh()` cached data use karta hai.
     """
     _atomic_csv_write(df, MAIN_CSV)
     if not _clear_schemes_cache():
@@ -270,8 +288,12 @@ def _get_admin_password():
     return None
 
 
-ADMIN_PASSWORD = _get_admin_password()
 MAX_LOGIN_ATTEMPTS = 5
+
+
+def _get_admin_password_lazy():
+    """Runtime pe password fetch — import time pe nahi."""
+    return _get_admin_password()
 
 
 def check_admin():
@@ -285,7 +307,9 @@ def login_admin():
     """Sidebar admin login form."""
     with st.sidebar:
         st.markdown("### 🔐 Admin Login")
-        if not ADMIN_PASSWORD:
+        # v5 FIX: lazy fetch — module import time pe nahi
+        admin_password = _get_admin_password_lazy()
+        if not admin_password:
             st.error(
                 "Admin password not configured. "
                 "Please set ADMIN_PASSWORD in st.secrets or environment variables."
@@ -306,7 +330,7 @@ def login_admin():
             "Password", type="password", key="admin_pass"
         )
         if st.button("Login", key="admin_login_btn"):
-            if password == ADMIN_PASSWORD:
+            if password == admin_password:
                 st.session_state.is_admin = True
                 st.session_state.admin_attempts = 0
                 _safe_toast("Login Successful!", icon="✅")
@@ -316,17 +340,22 @@ def login_admin():
                 remaining = MAX_LOGIN_ATTEMPTS - st.session_state.admin_attempts
                 st.error(f"Incorrect Password! ({remaining} attempts left)")
 
-
 # ===========================
 # LOAD SCHEMES (fresh)
 # ===========================
 def _load_schemes_fresh():
     """
-    Cache bypass karke fresh schemes load karta hai.
+    v4 FIX: `_clear_schemes_cache()` call hataayi — pehle ye har admin
+    panel render pe cache clear kar deta tha, jisse:
+      1. Cache ka fayda hi nahi milta tha (data hamesha fresh load hota)
+      2. Performance hit hota tha (337 rows ka CSV parse every time)
+      3. Read-only operations bhi cache destroy kar dete the
+
+    Ab cache sirf `save_schemes_data()` mein clear hoti hai — jahan data
+    actually change hua ho. Read operations cached data use karte hain.
+
     Returns: DataFrame with SCHEME_COLUMNS ensured.
     """
-    _clear_schemes_cache()
-
     df = None
     try:
         from matcher import load_schemes
@@ -651,7 +680,18 @@ def _render_scraping_tab():
 
 
 def _render_reset_button():
-    """Reset-to-original-data button with 2-step confirmation."""
+    """
+    Reset-to-original-data button with 2-step confirmation.
+
+    v4 FIX: Confirm Reset ke andar ka `st.rerun()` ab try/except ke BAHAR
+    hai. Pehle wahi pattern tha jo Explain Simply mein hang kara raha tha —
+    `st.rerun()` ek special Streamlit exception raise karta hai jise kuch
+    versions ka `except Exception` silently swallow kar leta hai, jisse
+    page reload nahi hota tha aur success toast bhi kabhi dikh jaata tha,
+    kabhi nahi. Ab:
+      1. Data operations try/except ke andar (fail ho to error dikhe)
+      2. rerun + toast try/except ke bahar (guaranteed execute ho)
+    """
     if not os.path.exists(BACKUP_PATH):
         st.button(
             "♻️ Reset to Original Data",
@@ -694,15 +734,20 @@ def _render_reset_button():
                 disabled=not confirm,
                 key="admin_confirm_reset_btn",
             ):
+                # v4 FIX: Data operations inside try/except, rerun OUTSIDE.
+                success = False
                 try:
                     backup_df = pd.read_csv(BACKUP_PATH)
                     _atomic_csv_write(backup_df, MAIN_CSV)
                     _clear_schemes_cache()
                     st.session_state.confirm_reset_pending = False
-                    _safe_toast("✅ Data reset to original!", icon="✅")
-                    st.rerun()
+                    success = True
                 except Exception as e:
                     st.error(f"Reset failed: {safe_str(e)[:150]}")
+
+                if success:
+                    _safe_toast("✅ Data reset to original!", icon="✅")
+                    st.rerun()
 
         with rcol2:
             if st.button("Cancel", key="admin_cancel_reset_btn"):
@@ -720,7 +765,7 @@ def admin_panel():
 
     ensure_original_backup()
 
-    # Fresh load (cache bypass)
+    # Fresh load (uses cache — only invalidated on save)
     df = _load_schemes_fresh()
 
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -872,6 +917,33 @@ if __name__ == "__main__":
     # Should return False (no Streamlit context), not crash
     assert result is False
     print("  ✅ Returns False without crashing")
+
+    # Test 11 (v4): _load_schemes_fresh no longer clears cache
+    print("\n[Test 11] v4 — _load_schemes_fresh no longer clears cache:")
+    import inspect
+    src = inspect.getsource(_load_schemes_fresh)
+    # Verify _clear_schemes_cache is NOT called inside the function body
+    # (allowed only in docstring/comment text, not as executable call)
+    lines = src.split("\n")
+    executable_lines = [
+        ln.strip() for ln in lines
+        if ln.strip()
+        and not ln.strip().startswith("#")
+        and not ln.strip().startswith('"""')
+        and not ln.strip().startswith("'''")
+    ]
+    # Simple heuristic: check no line == "_clear_schemes_cache()" in the executable body
+    offending = [ln for ln in executable_lines if ln == "_clear_schemes_cache()"]
+    assert not offending, f"v4 regression: {offending} found in _load_schemes_fresh"
+    print("  ✅ _load_schemes_fresh does NOT clear cache (v4 fix intact)")
+
+    # Test 12 (v4): Reset button's st.rerun is OUTSIDE try/except
+    print("\n[Test 12] v4 — Reset button rerun outside try/except:")
+    reset_src = inspect.getsource(_render_reset_button)
+    # Verify the "success = True" pattern exists (means rerun was moved out)
+    assert "success = True" in reset_src, "v4 pattern not applied in reset button"
+    assert "if success:" in reset_src, "v4 pattern not applied in reset button"
+    print("  ✅ Reset button uses success-flag pattern (v4 fix intact)")
 
     print("\n" + "=" * 60)
     print("✅ admin_panel.py — ALL CHECKS PASSED")

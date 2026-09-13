@@ -1,27 +1,29 @@
 """
-voice_assistant.py — Voice Assistant v21.
+voice_assistant.py — Voice Assistant v23.
 
-v21 FIXES (based on v20 analysis):
+v23 FIXES:
+  - `@st.cache_resource` decorator REMOVED from `_get_cached_llm()`.
+    Ye wahi bug tha jo ai_chatbot.py aur simple_explain.py mein tha —
+    decorator Streamlit ke cache system ke saath conflict karta tha aur
+    pehli call pe app hang kar deta tha. Ab har call pe naya ChatGroq
+    instance banta hai (fast — sirf object creation, koi network call nahi).
+
+v22 FIXES (inherited):
+  - Edge TTS timeout 30s → 5s (2 jagah). Ye "Listen" button ka 30-second
+    hang fix karta hai.
+  - `_get_cached_llm()` ke timeout bhi 20s → 8s.
+
+v21 FIXES (inherited):
   - BUG #1: `audio_attempt` dead variable REMOVED entirely.
-  - BUG #2: `voice_round` ab error paths pe bhi increment hota hai —
-    stale recording re-mount nahi hoga.
-  - BUG #3: `_cleanup_audio_widgets()` simplify — sirf widget key
-    rotate karo (round increment se); externally delete karna
-    deprecated/unsafe tha.
-  - BUG #4: Session state mein audio widget keys accumulate nahi honge —
-    sirf current round ka key rahega.
-  - BUG #5: MutationObserver infinite loop fix — `applied` flag ab
-    applySticky() mein actually checked hai.
-  - BUG #6: Edge TTS timeout ab asyncio.wait_for se enforced — thread
-    background mein nahi bhatakta.
-  - BUG #14: Audio format conversion via pydub — browser WebM/OGG
-    ko WAV mein convert karta hai BEFORE SpeechRecognition (jo sirf
-    WAV accept karta hai). Ye browser-specific transcription failure
-    ka root cause fix hai.
+  - BUG #2: `voice_round` ab error paths pe bhi increment hota hai.
+  - BUG #3: `_cleanup_audio_widgets()` simplify.
+  - BUG #4: Session state mein audio widget keys accumulate nahi honge.
+  - BUG #5: MutationObserver infinite loop fix.
+  - BUG #6: Edge TTS timeout ab asyncio.wait_for se enforced.
+  - BUG #14: Audio format conversion via pydub.
   - BUG #16: LLM init failure ab printed/logged.
   - BUG #19: Marathi/Tamil summary translations added.
   - BUG #20: voice_history capped at 50 entries.
-  - `_build_top5_summary` all 4 languages support karta hai.
 
 Depends on: streamlit, numpy, pandas, dotenv, and optionally:
   gTTS, edge-tts, SpeechRecognition, noisereduce, pydub
@@ -128,10 +130,25 @@ def _safe_remove(path):
 
 
 # ===========================
-# CACHED LLM
+# LLM FACTORY (v23: no caching)
 # ===========================
-@st.cache_resource(show_spinner=False)
 def _get_cached_llm():
+    """
+    ChatGroq instance return karta hai.
+
+    v23 FIX: @st.cache_resource decorator hataa diya. Ye decorator
+    Streamlit ke cache system ke saath conflict karta tha aur pehli
+    call pe app hang kar deta tha — same bug jo ai_chatbot.py aur
+    simple_explain.py mein tha.
+
+    Ab har call pe naya ChatGroq instance banta hai — bahut fast
+    operation hai (sirf object creation, koi network call nahi).
+    ChatGroq internally connection pooling handle karta hai, isliye
+    har call pe naya object banane se performance pe asar nahi padta.
+
+    Function ka naam `_get_cached_llm` hi rakha taaki existing callers
+    na tootein (legacy naam hai, lekin ab caching nahi hoti).
+    """
     try:
         from langchain_groq import ChatGroq
         api_key = os.getenv("GROQ_API_KEY")
@@ -141,7 +158,7 @@ def _get_cached_llm():
             temperature=0.7,
             groq_api_key=api_key,
             model_name=DEFAULT_GROQ_MODEL,
-            timeout=20,
+            timeout=8,  # v22: 20 → 8 (hang duration kam)
         )
     except Exception as e:
         print(f"[voice_assistant] LLM init failed: {type(e).__name__}: {e}")
@@ -219,7 +236,6 @@ def _force_sticky_bar():
         }
 
         function applySticky() {
-            // v21: actual guard to prevent infinite MutationObserver loop
             if (applied) return;
             try {
                 var bar = findStickyBar();
@@ -251,7 +267,6 @@ def _force_sticky_bar():
             }
         }
 
-        // v21: debounced re-apply — instead of immediate, wait a frame
         function scheduleApply() {
             if (scheduled) return;
             scheduled = true;
@@ -295,13 +310,12 @@ def _force_sticky_bar():
 
 
 # ===========================
-# EDGE TTS (v21 — hard timeout via asyncio.wait_for)
+# EDGE TTS (v22: default timeout 5s)
 # ===========================
-def _generate_edge_audio_with_rate(text, voice, rate_str, timeout=30):
+def _generate_edge_audio_with_rate(text, voice, rate_str, timeout=5):
     """
-    v21: asyncio.wait_for se hard timeout enforced — thread background mein
-    bhatakta nahi. Pehle thread.join(timeout) blocking tha, aur inner
-    coroutine background mein chalta rehta tha.
+    v22: default timeout 30 → 5. asyncio.wait_for se hard timeout enforced
+    — thread background mein bhatakta nahi.
     """
     result = {"data": None, "error": None}
 
@@ -321,7 +335,6 @@ def _generate_edge_audio_with_rate(text, voice, rate_str, timeout=30):
                 return buf.read()
 
             async def _gen_with_timeout():
-                # Safety margin: 1 second less than thread join timeout
                 inner_timeout = max(1, timeout - 1)
                 return await asyncio.wait_for(_collect(), timeout=inner_timeout)
 
@@ -340,10 +353,9 @@ def _generate_edge_audio_with_rate(text, voice, rate_str, timeout=30):
 
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
-    thread.join(timeout=timeout + 2)  # outer safety margin
+    thread.join(timeout=timeout + 2)
 
     if thread.is_alive():
-        # Extremely rare — inner wait_for should have fired. Just give up.
         return None, TimeoutError(f"Edge TTS hard timeout")
 
     return result["data"], result["error"]
@@ -398,7 +410,8 @@ def generate_audio_bytes(text, lang_choice="English", speed=1.0, voice_gender="F
         rate_pct = int((speed - 1.0) * 100)
         rate_str = f"{rate_pct:+d}%"
 
-        audio_bytes, error = _generate_edge_audio_with_rate(text, voice, rate_str, timeout=30)
+        # v22: timeout 30 → 5
+        audio_bytes, error = _generate_edge_audio_with_rate(text, voice, rate_str, timeout=5)
         if not error and audio_bytes and len(audio_bytes) > 0:
             return audio_bytes, None
 
@@ -508,12 +521,6 @@ def reduce_noise(audio_bytes):
 # AUDIO → WAV CONVERSION (v21 — browser format fix)
 # ===========================
 def _convert_to_wav(audio_bytes):
-    """
-    Browser's `st.audio_input` WebM/OGG/MP3 de sakta hai. SpeechRecognition
-    sirf WAV accept karta hai. pydub se convert karo.
-
-    Returns: wav_bytes or original audio_bytes on failure.
-    """
     if not _PYDUB_AVAILABLE:
         return audio_bytes
     try:
@@ -534,8 +541,6 @@ def _transcribe_audio(audio_bytes, lang_choice, apply_noise_reduction=False):
     if not _SR_AVAILABLE:
         raise RuntimeError("Voice recognition not available (install SpeechRecognition)")
 
-    # v21: Convert to WAV FIRST (before noise reduction — noise reduction
-    # also expects WAV via scipy.io.wavfile)
     audio_bytes = _convert_to_wav(audio_bytes)
 
     if apply_noise_reduction and _NOISE_REDUCE_AVAILABLE:
@@ -1037,7 +1042,6 @@ def _process_voice_query(voice_query, df, t, lang_choice,
                 "results": len(filtered),
                 "timestamp": time.strftime("%d-%m-%Y %H:%M"),
             })
-            # v21: cap history at 50 entries
             if len(st.session_state.voice_history) > 50:
                 st.session_state.voice_history = st.session_state.voice_history[-50:]
         except Exception:
@@ -1070,7 +1074,6 @@ def _process_voice_query(voice_query, df, t, lang_choice,
 
 
 def _build_top5_summary(filtered, lang_choice):
-    """v21: all 4 languages supported."""
     result_count = len(filtered)
 
     if lang_choice == "हिंदी":
@@ -1093,7 +1096,6 @@ def _build_top5_summary(filtered, lang_choice):
 # STATE MANAGEMENT
 # ===========================
 def _init_voice_state():
-    """v21: `audio_attempt` removed (dead variable)."""
     defaults = {
         "voice_transcript": "",
         "voice_results": [],
@@ -1120,7 +1122,6 @@ def _init_voice_state():
 
 
 def _reset_voice_session(full_reset=False):
-    """v21: `voice_round` increment — widget key rotate (safe cleanup)."""
     st.session_state.voice_round += 1
     st.session_state.voice_transcript = ""
     st.session_state.voice_results = []
@@ -1143,7 +1144,7 @@ def _reset_voice_session(full_reset=False):
 def render_voice_assistant(df, t, lang_choice, search_schemes_fn,
                             sort_results_fn, render_scheme_card_fn,
                             history_module):
-    """Voice Assistant v21 — main entry point."""
+    """Voice Assistant v23 — main entry point."""
 
     _inject_voice_ui_css()
     _force_sticky_bar()
@@ -1186,7 +1187,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn,
     )
     st.markdown(heading_html, unsafe_allow_html=True)
 
-    # v21: Filters only shown if results exist (cleaner UX)
     has_results = bool(st.session_state.voice_results)
 
     if has_results:
@@ -1441,7 +1441,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn,
         rec_col1, rec_col2, rec_col3 = st.columns([7, 1, 1], gap="small")
 
         with rec_col1:
-            # v21: Toggle approach — button mount karta hai audio_input ko.
             if not st.session_state.get("show_audio_widget", False):
                 if st.button(
                     "🎤 Tap to Record",
@@ -1512,7 +1511,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn,
             audio_value.seek(0)
             audio_hash = hash(audio_bytes_temp)
         except Exception:
-            # v21: increment voice_round on ANY failure — stale widget issue fix
             st.session_state.show_audio_widget = False
             st.session_state.voice_round += 1
             st.session_state.last_audio_hash = None
@@ -1538,7 +1536,6 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn,
                             income_filter, only_eligible_filter,
                         )
 
-                    # v21: rotate round → fresh widget next time
                     st.session_state.show_audio_widget = False
                     st.session_state.voice_round += 1
                     st.session_state.last_audio_hash = None
@@ -1565,7 +1562,7 @@ def render_voice_assistant(df, t, lang_choice, search_schemes_fn,
 # ===========================
 def _run_self_tests():
     print("=" * 60)
-    print("voice_assistant.py — v21 Verification")
+    print("voice_assistant.py — v23 Verification")
     print("=" * 60)
 
     print("\n[Test 1] _safe_str:")
@@ -1589,7 +1586,7 @@ def _run_self_tests():
     assert "✅" not in clean and "🎉" not in clean
     print(f"  ✅ '{dirty}' → '{clean}'")
 
-    print("\n[Test 4] _build_top5_summary (v21 — all languages):")
+    print("\n[Test 4] _build_top5_summary (all languages):")
     filtered = [
         {"scheme_name": "Scheme A"},
         {"scheme_name": "Scheme B"},
@@ -1628,14 +1625,24 @@ def _run_self_tests():
     assert len(filtered) == 2
     print(f"  ✅ Filter keeps 'All' + MP: {len(filtered)} results")
 
-    print("\n[Test 7] v21 — dead variables removed:")
-    # `audio_attempt` should NOT appear anywhere in the module source
+    print("\n[Test 7] Dead variables removed:")
     import inspect
     src = inspect.getsource(__import__(__name__))
     assert "audio_attempt" not in src, "audio_attempt should be removed (dead var)"
     print("  ✅ 'audio_attempt' dead variable removed")
 
-    print("\n[Test 8] Optional dependencies:")
+    print("\n[Test 8] v22 timeout check:")
+    assert "timeout=5" in src, "timeout=5 should be present in v22"
+    print("  ✅ timeout=5 found in source")
+
+    print("\n[Test 9] v23 — _get_cached_llm NOT decorated with @st.cache_resource:")
+    llm_src = inspect.getsource(_get_cached_llm)
+    first_line = llm_src.split("\n")[0].strip()
+    assert not first_line.startswith("@st.cache_resource"), \
+        f"_get_cached_llm still has @st.cache_resource decorator: {first_line}"
+    print("  ✅ _get_cached_llm() decorator-free (v23 fix intact)")
+
+    print("\n[Test 10] Optional dependencies:")
     print(f"  gTTS:              {_GTTS_AVAILABLE}")
     print(f"  edge-tts:          {_EDGE_TTS_AVAILABLE}")
     print(f"  SpeechRecognition: {_SR_AVAILABLE}")
@@ -1643,15 +1650,25 @@ def _run_self_tests():
     print(f"  pydub:             {_PYDUB_AVAILABLE}")
     print(f"  GROQ_MODEL:        {DEFAULT_GROQ_MODEL}")
 
-    print("\n[Test 9] _convert_to_wav helper exists:")
+    print("\n[Test 11] _convert_to_wav helper exists:")
     assert callable(_convert_to_wav)
-    # With garbage bytes it should return original (graceful)
     out = _convert_to_wav(b"garbage")
     assert out == b"garbage"
     print("  ✅ Conversion graceful on failure")
 
+    print("\n[Test 12] _get_cached_llm returns None without API key:")
+    # Temporarily remove API key to verify behavior
+    old_key = os.environ.pop("GROQ_API_KEY", None)
+    try:
+        result = _get_cached_llm()
+        assert result is None
+        print("  ✅ Returns None without API key")
+    finally:
+        if old_key is not None:
+            os.environ["GROQ_API_KEY"] = old_key
+
     print("\n" + "=" * 60)
-    print("✅ voice_assistant.py v21 — ALL CHECKS PASSED")
+    print("✅ voice_assistant.py v23 — ALL CHECKS PASSED")
     print("=" * 60)
 
 

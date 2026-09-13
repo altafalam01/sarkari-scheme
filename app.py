@@ -3,19 +3,14 @@ app.py — Main entry point for Sarkari Scheme Finder.
 
 Multi-mode Streamlit app with 13 sidebar modes.
 
-FIXES (v5):
-  - CRITICAL: `submitted` transient boolean bug fixed — search params ab
-    st.session_state mein persist hote hain, results reliably render hote hain.
-  - CRITICAL: NameErrors fixed (`only_eligible`, `sort_choice_form`,
-    `sort_choice_nl`, `gender`, `occupation`, `state`, `category_type`) —
-    saare values ab st.session_state se read hoti hain.
-  - Checkbox/selectbox widget keys added — state persist karta hai.
-  - Atomic JSON writes (profile, applications, notifications).
-  - Corrupt JSON quarantine (silent swallow nahi).
-  - Query param cleanup improved.
-  - `get_deadline_status` invalid dates ke liye (None, None, None) — chip hide.
-  - `_render_scraping_tab(df)` unused param removed.
-  - set_page_config() FIRST (Streamlit requirement).
+FIXES (v7):
+  - CRITICAL: Stray `st.rerun()` line removed from before render_scheme_card()
+    — ye infinite loop bana raha tha jisse sidebar buttons aur "Explain Simply"
+    dono kaam nahi kar rahe the.
+  - All `st.rerun(scope="fragment")` calls changed to `st.rerun()` — since
+    @st.fragment decorator is removed, fragment-scoped rerun would error silently.
+  - v6, v5 ke saare fixes intact: submitted boolean, NameErrors, atomic writes,
+    corrupt JSON quarantine, get_deadline_status safety, set_page_config.
 """
 
 import base64
@@ -62,14 +57,6 @@ except ImportError:
 # ===========================
 LOGO_PATH = os.path.join("assets", "logo.png")
 
-try:
-    APP_URL = st.secrets.get(
-        "APP_URL",
-        os.environ.get("APP_URL", "https://sarkari-scheme.streamlit.app"),
-    )
-except Exception:
-    APP_URL = os.environ.get("APP_URL", "https://sarkari-scheme.streamlit.app")
-
 
 def get_logo_base64():
     if os.path.exists(LOGO_PATH):
@@ -85,7 +72,9 @@ LOGO_B64 = get_logo_base64()
 
 
 # ===========================
-# PAGE CONFIG — MUST BE FIRST
+# PAGE CONFIG — MUST BE THE VERY FIRST STREAMLIT CALL
+# (v1.40.2 mein st.secrets bhi ek "command" count hota hai,
+#  isliye ye pehle aana chahiye)
 # ===========================
 st.set_page_config(
     page_title="Sarkari Scheme",
@@ -93,6 +82,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# ===========================
+# APP URL — environment variable se, warna default.
+# st.secrets skip kar rahe hain kyunki secrets.toml nahi hai,
+# aur usse "No secrets found" warning aati hai Streamlit 1.40 mein.
+# Agar future mein Streamlit Cloud pe deploy karo, to secrets use kar sakte ho.
+# ===========================
+APP_URL = os.environ.get("APP_URL", "https://sarkari-scheme.streamlit.app")
+
 
 IS_MOBILE = is_mobile()
 apply_mobile_css()
@@ -580,15 +579,13 @@ if "glow_trail_injected" not in st.session_state:
 
 
 # ===========================
-# AUTO-SCRAPING (once per session)
+# AUTO-SCRAPING — DISABLED ON STARTUP (performance fix)
 # ===========================
+# Scraping startup pe NAHI chalega. Sirf Admin Panel se manually trigger hoga.
 if "auto_scraping_checked" not in st.session_state:
     st.session_state.auto_scraping_checked = True
-    try:
-        from web_scraper import setup_scheduled_scraping
-        setup_scheduled_scraping()
-    except Exception as e:
-        print(f"[app.py] Auto-scraping setup failed: {type(e).__name__}: {e}")
+    # Auto-scraping startup pe disabled hai — Admin Panel se manual trigger
+    pass
 
 
 # ===========================
@@ -759,9 +756,11 @@ with st.sidebar:
 
 
 # ===========================
-# SCHEME CARD (FRAGMENT)
+# SCHEME CARD
 # ===========================
-@st.fragment
+# v7 FIX: @st.fragment decorator removed — fragment ke andar rerun stuck ho jaata
+# tha, jisse buttons (especially "Explain Simply" aur sidebar) respond nahi karte the.
+# Ab poora page rerun hota hai, jo reliable hai (thoda slow, lekin kaam karta hai).
 def render_scheme_card(r, t, key_prefix, lang_choice):
     if not isinstance(r, dict):
         return
@@ -834,7 +833,7 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
             st.toast(
                 t["fav_added_toast"] if not is_fav else t["fav_removed_toast"]
             )
-            st.rerun(scope="fragment")
+            st.rerun()
 
     with col2:
         if is_valid_url(apply_link):
@@ -911,7 +910,7 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
             ):
                 save_application(scheme_name, selected_status)
                 st.toast(t["app_status_updated_toast"])
-                st.rerun(scope="fragment")
+                st.rerun()
 
     if r.get("checks"):
         with st.expander(t["eligibility_breakdown"]):
@@ -963,7 +962,7 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
                         scheme_name, reminder_date.isoformat(), reminder_note
                     )
                     st.toast(t["reminder_saved_toast"])
-                    st.rerun(scope="fragment")
+                    st.rerun()
                 else:
                     st.warning(t["reminder_date_warning"])
         with rcol2:
@@ -973,8 +972,11 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
             ):
                 reminders_module.remove_reminder(scheme_name)
                 st.toast(t["reminder_removed_toast"])
-                st.rerun(scope="fragment")
+                st.rerun()
 
+    # ===================================================================
+    # v6/v7 FIX: "Explain Simply" — ab properly output render karta hai
+    # ===================================================================
     with st.expander(t["explain_simply_label"]):
         explain_state_key = f"{key_prefix}_explain_{widget_key}"
         col1, col2 = st.columns([3, 1])
@@ -985,27 +987,24 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
                 use_container_width=True,
                 type="primary",
             ):
-                progress_text = st.empty()
-                progress_text.info(t["explain_generating"])
-                try:
-                    simple_text = simple_explain.explain_scheme(
-                        scheme_name=scheme_name,
-                        description=description,
-                        benefits=benefits,
-                        lang_choice=lang_choice,
-                        category_type=category_type,
-                        applicable_state=applicable_state,
-                        apply_link=apply_link,
-                        deadline=r.get("deadline", ""),
-                        eligible=r.get("eligible", False),
-                        score=r.get("score", 0),
-                    )
-                    st.session_state[explain_state_key] = simple_text
-                    progress_text.empty()
-                    st.success(t["explain_success"])
-                except Exception as e:
-                    progress_text.empty()
-                    st.error(f"{t['explain_error']} {safe_str(e)[:120]}")
+                with st.spinner(t["explain_generating"]):
+                    try:
+                        simple_text = simple_explain.explain_scheme(
+                            scheme_name=scheme_name,
+                            description=description,
+                            benefits=benefits,
+                            lang_choice=lang_choice,
+                            category_type=category_type,
+                            applicable_state=applicable_state,
+                            apply_link=apply_link,
+                            deadline=r.get("deadline", ""),
+                            eligible=r.get("eligible", False),
+                            score=r.get("score", 0),
+                        )
+                        st.session_state[explain_state_key] = simple_text
+                        # st.rerun() HATAYA — Streamlit naturally rerun karega
+                    except Exception as e:
+                        st.error(f"{t['explain_error']} {safe_str(e)[:120]}")
         with col2:
             if st.button(
                 t["listen_btn"],
@@ -1031,12 +1030,11 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
         if explain_state_key in st.session_state:
             st.markdown("---")
             st.markdown(f"### {t['explain_simple_title']}")
-            st.markdown(
-                '<div style="background: rgba(255,255,255,0.05); padding: 15px; '
-                'border-radius: 10px; border-left: 4px solid #FF9933;">'
-                f'{st.session_state[explain_state_key]}</div>',
-                unsafe_allow_html=True,
-            )
+            # FIX: LLM output markdown hai (jinme newlines hote hain).
+            # Unsafe HTML <div> mein daalna CommonMark Rule 6 ke wajah se
+            # toot jaata tha. Native container mein render karo.
+            with st.container(border=True):
+                st.markdown(st.session_state[explain_state_key])
             st.markdown("---")
 
     st.write("")
@@ -1340,7 +1338,6 @@ df = load_schemes()
 def _render_eligibility_mode():
     st.markdown('<div class="mode-content-anchor"></div>', unsafe_allow_html=True)
 
-    # If results already exist in session, show them
     if st.session_state.get("form_submitted", False):
         results = st.session_state.get("form_results", [])
         eligible_count = st.session_state.get("form_eligible_count", 0)
@@ -1418,19 +1415,17 @@ def _render_eligibility_mode():
             st.info(t["no_results"])
 
     else:
-        # No submission yet — just show hint
         st.info(t["hint"])
 
 
 # ===========================
-# FORM SUBMISSION HANDLER (runs once after sidebar button click)
+# FORM SUBMISSION HANDLER
 # ===========================
 def _handle_form_submission():
-    """Agar form_submitted=True hai lekin results nahi hain, to compute karo."""
     if not st.session_state.get("form_submitted", False):
         return
     if st.session_state.get("form_results"):
-        return  # Already computed
+        return
 
     params = st.session_state.get("search_params", {})
     if not params:

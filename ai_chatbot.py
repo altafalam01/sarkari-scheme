@@ -10,23 +10,26 @@ Features:
   6. Quick Reply Suggestions
   7. Assistant Analytics (Logging)
 
-FIXES (v5):
-  - get_llm() now @st.cache_resource decorated and defined at TOP of file —
-    single LLM instance shared across all callers (matches simple_explain.py
-    pattern). Previously two separate instances were created.
+FIXES (v6):
+  - CRITICAL: `@st.cache_resource` decorator REMOVED from `get_llm()`.
+    Ye decorator Streamlit ke cache system ke saath conflict karta tha
+    aur pehli call pe app hang kar deta tha (same bug jo
+    simple_explain.py mein tha). Ab har call pe naya ChatGroq instance
+    banta hai — bahut fast operation hai (sirf object creation).
+  - `GROQ_TIMEOUT` 20s → 8s — hang duration kam.
+  - `generate_ai_recommendation()` ab language-aware hai: user ki
+    `lang_choice` ke hisaab se Hindi ya English mein response deta hai
+    (pehle hardcoded Hinglish tha).
+
+FIXES (v5, inherited):
+  - get_llm() defined at TOP of file — single LLM instance shared
+    across all callers.
   - reset_assistant() also clears ai_conversation + _last_assistant_mode.
-  - fallback_search_schemes() now computes real match score instead of
-    hardcoded 0.5 — sort order stable and "match %" chip meaningful.
-  - render_nl_chat_mode() uses session_state.lang_choice instead of
-    hardcoded "English" — docs/explanation now respect user language.
-  - render_profile_mode() progress bar HTML built as SINGLE-LINE
-    concatenation (CommonMark HTML block bug fix).
-  - nl_search imported at top (not inside function) — consistent with
-    Streamlit caching model.
+  - fallback_search_schemes() computes real match score.
+  - render_nl_chat_mode() uses session_state.lang_choice.
+  - render_profile_mode() progress bar HTML single-line.
+  - nl_search imported at top.
   - ai_chatbot_ui() nested try/except around load_schemes() fallback.
-  - _safe_str / _atomic_json_write / _expand_query_typos / _normalize_state
-    unchanged from v4 (they were correct).
-  - Auto-scroll exception now logged (not silently swallowed).
 """
 
 import os
@@ -61,22 +64,27 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL_NAME", "openai/gpt-oss-20b")
 
 MAX_LOG_ENTRIES = 200
-GROQ_TIMEOUT = 20
+
+# v6: 20 → 8 (hang duration kam)
+GROQ_TIMEOUT = 8
 
 
 # ===========================
-# CACHED LLM (single source of truth)
+# LLM FACTORY (v6: no caching)
 # ===========================
-@st.cache_resource(show_spinner=False)
 def get_llm():
     """
-    ChatGroq instance — @st.cache_resource se cached, taaki har call pe
-    naya object na bane.
+    ChatGroq instance return karta hai.
 
-    Ye function ab file ke TOP pe hai taaki saare callers ise access kar
-    sakein without forward reference. Pehle ye file ke neeche tha, aur
-    upar wale functions forward-reference par depend karte the (works
-    but confusing).
+    v6 FIX: @st.cache_resource decorator hataa diya. Ye decorator
+    Streamlit ke cache system ke saath conflict karta tha aur pehli
+    call pe app hang kar deta tha — same bug jo simple_explain.py
+    mein tha (v4 mein wahan bhi hataaya tha).
+
+    Ab har call pe naya ChatGroq instance banta hai — ye bahut fast
+    operation hai (sirf object creation, koi network call nahi).
+    ChatGroq internally connection pooling handle karta hai, isliye
+    har call pe naya object banane se performance pe asar nahi padta.
 
     Returns None if API key missing or init fails.
     """
@@ -580,10 +588,16 @@ def fallback_search_schemes(query, df, top_n=5):
 
 
 # ===========================
-# AI RECOMMENDATION
+# AI RECOMMENDATION (v6: language-aware)
 # ===========================
 def generate_ai_recommendation(profile, matched_schemes):
-    """Profile-based AI recommendation (Hinglish)."""
+    """
+    Profile-based AI recommendation.
+
+    v6 FIX: Ab language-aware hai — user ki `lang_choice` (English / हिंदी)
+    ke hisaab se Hindi ya English mein response maangta hai. Pehle hardcoded
+    Hinglish tha, jo English users ke liye confusing tha.
+    """
     llm = get_llm()
     if not llm or not matched_schemes:
         return None
@@ -599,6 +613,21 @@ def generate_ai_recommendation(profile, matched_schemes):
     if not top_schemes:
         return None
 
+    # v6: Language-aware prompt
+    lang_choice = st.session_state.get("lang_choice", "English")
+    if lang_choice == "हिंदी":
+        lang_instruction = (
+            "Generate a personalized 2-3 line recommendation in simple Hindi. "
+            "Mention the user's profile and why these schemes suit them. "
+            "Keep it friendly and helpful."
+        )
+    else:
+        lang_instruction = (
+            "Generate a personalized 2-3 line recommendation in simple English. "
+            "Mention the user's profile and why these schemes suit them. "
+            "Keep it friendly and helpful."
+        )
+
     prompt = (
         "User Profile:\n"
         f"- Age: {profile.get('age')}\n"
@@ -608,9 +637,7 @@ def generate_ai_recommendation(profile, matched_schemes):
         f"- Income: Rs {profile.get('income')}\n\n"
         "Top Matching Schemes:\n"
         + "\n".join(f"- {s}" for s in top_schemes)
-        + "\n\nGenerate a personalized 2-3 line recommendation in Hinglish "
-        "(Hindi + English mix) for this user. Mention their profile and why "
-        "these schemes suit them. Keep it friendly and helpful."
+        + f"\n\n{lang_instruction}"
     )
 
     try:
@@ -814,7 +841,7 @@ def render_nl_chat_mode(df, render_scheme_card, sort_results, t):
         st.markdown("---")
         st.markdown("### 🎯 Recommended Schemes:")
         if render_scheme_card and t:
-            # v5 FIX: use actual lang_choice from session_state (was hardcoded "English")
+            # v5 FIX: use actual lang_choice from session_state
             lang_choice = st.session_state.get("lang_choice", "English")
             for r in last_schemes[:5]:
                 try:
@@ -1320,7 +1347,7 @@ def ai_chatbot_ui():
 # ===========================
 if __name__ == "__main__":
     print("=" * 60)
-    print("ai_chatbot.py — Verification")
+    print("ai_chatbot.py — Verification (v6)")
     print("=" * 60)
 
     # Test 1: _safe_str
@@ -1405,7 +1432,6 @@ if __name__ == "__main__":
     ])
     results = fallback_search_schemes("kisan loan farmer", df, top_n=5)
     assert len(results) > 0
-    # Score should NOT be hardcoded 0.5 — should vary
     scores = [r["score"] for r in results]
     assert all(0 < s <= 1.0 for s in scores), f"Scores out of range: {scores}"
     print(f"  ✅ Found {len(results)} results, scores: {scores}")
@@ -1421,9 +1447,39 @@ if __name__ == "__main__":
     print(f"  ✅ Student → {len(get_dynamic_questions({'occupation': 'Student'}))} questions")
     print(f"  ✅ Farmer → {len(get_dynamic_questions({'occupation': 'Farmer'}))} questions")
 
-    # Test 9: get_llm is decorated with cache_resource
-    print("\n[Test 9] get_llm cached:")
-    # Just check it's callable and returns None without API key
+    # Test 9 (v6): GROQ_TIMEOUT is 8 (not 20)
+    print("\n[Test 9] v6 — GROQ_TIMEOUT is 8:")
+    assert GROQ_TIMEOUT == 8, f"GROQ_TIMEOUT should be 8, got {GROQ_TIMEOUT}"
+    print(f"  ✅ GROQ_TIMEOUT = {GROQ_TIMEOUT}")
+
+    # Test 10 (v6): get_llm is NOT decorated with cache_resource
+    print("\n[Test 10] v6 — get_llm NOT decorated with @st.cache_resource:")
+    import inspect
+    src = inspect.getsource(get_llm)
+    # Verify no @st.cache_resource immediately above get_llm
+    # (inspect.getsource typically starts at the decorator if present)
+    first_line = src.split("\n")[0].strip()
+    assert not first_line.startswith("@st.cache_resource"), \
+        f"get_llm still has @st.cache_resource decorator: {first_line}"
+    print("  ✅ get_llm() decorator-free (v6 fix intact)")
+
+    # Test 11: _build_progress_bar_html single-line
+    print("\n[Test 11] progress bar HTML single-line:")
+    html = _build_progress_bar_html(50)
+    assert "<div" in html
+    assert "neonProgress" in html
+    assert "\n\n" not in html
+    print("  ✅ Progress bar HTML safe for CommonMark")
+
+    # Test 12 (v6): Language-aware recommendation prompt
+    print("\n[Test 12] v6 — generate_ai_recommendation language-aware:")
+    rec_src = inspect.getsource(generate_ai_recommendation)
+    assert "lang_choice" in rec_src, "v6 language-aware fix missing"
+    assert "हिंदी" in rec_src, "Hindi branch missing in v6 fix"
+    print("  ✅ generate_ai_recommendation is language-aware")
+
+    # Test 13: get_llm callable and returns None without API key
+    print("\n[Test 13] get_llm() without API key:")
     llm = get_llm()
     if not GROQ_API_KEY:
         assert llm is None
@@ -1431,15 +1487,6 @@ if __name__ == "__main__":
     else:
         print(f"  ✅ LLM available (API key set)")
 
-    # Test 10: _build_progress_bar_html single-line
-    print("\n[Test 10] progress bar HTML single-line:")
-    html = _build_progress_bar_html(50)
-    assert "<div" in html
-    assert "neonProgress" in html
-    # Should not have double-newlines
-    assert "\n\n" not in html
-    print("  ✅ Progress bar HTML safe for CommonMark")
-
     print("\n" + "=" * 60)
-    print("✅ ai_chatbot.py — ALL CHECKS PASSED")
+    print("✅ ai_chatbot.py v6 — ALL CHECKS PASSED")
     print("=" * 60)

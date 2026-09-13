@@ -4,20 +4,31 @@ simple_explain.py — Simple-language scheme explanations.
 Uses Groq (via langchain-groq) when available; falls back to template-based
 simple text otherwise.
 
-FIXES (v3):
-  - explain_scheme_ai() ab (text, error) tuple return karta hai — caller
-    "❌" string matching par nahi depend karta (fragile tha).
-  - LLM ab @st.cache_resource se cache hoti hai — har call pe naya ChatGroq
-    nahi banta (performance fix).
-  - GROQ_MODEL_NAME default ab ai_chatbot.py ke saath consistent.
-  - ChatGroq call me timeout set kiya (hang prevention).
-  - Error messages sanitize hote hain (API key leak prevention).
-  - Non-string inputs None-safe.
-  - HAS_GROQ False + no API key — clear signal (ki AI off hai).
-  - __main__ self-test (offline, no API call).
+FIXES (v5):
+  - CRITICAL: `explain_scheme_ai()` mein LLM call ab HARD thread timeout
+    ke saath wrap hai (`_invoke_with_hard_timeout`). Pehle ChatGroq ka
+    `timeout=8` sirf httpx-level tha — TCP connect hang / DNS stuck /
+    network blackhole pe wo reliable nahi hota tha, jisse Streamlit ka
+    single thread PERMANENTLY block ho jaata tha. Symptoms:
+      1. "Get Simple Explanation" button kabhi return hi nahi karta tha
+      2. Us dauran sidebar ke saare buttons queue mein pending rehte the
+         (user ko lagta tha sidebar "dead" hai)
+    Ab chain.invoke() ek daemon thread mein chalta hai + join(8s) se
+    guaranteed return hota hai. Timeout pe template fallback milta hai,
+    app kabhi hang nahi hoti.
+
+FIXES (v4, inherited):
+  - @st.cache_resource decorators REMOVED from _get_cached_llm() and
+    _get_cached_prompt() — ye Streamlit ke cache system ke saath conflict
+    kar rahe the aur pehli call pe app ko hang kar dete the. Ab har call
+    pe naya ChatGroq instance banta hai (fast — sirf object creation hai).
+  - GROQ_TIMEOUT 20s → 8s — kam se kam hang duration kam ho.
+  - Baaki v3 ke saare fixes intact: (text, error) tuple return, sanitized
+    errors, None-safe inputs, template fallback, lang prompts.
 """
 
 import os
+import threading
 from dotenv import load_dotenv
 import streamlit as st
 
@@ -36,8 +47,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # ✅ CONSISTENT DEFAULT with ai_chatbot.py
 DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL_NAME", "openai/gpt-oss-20b")
 
-# Groq API timeout (seconds)
-GROQ_TIMEOUT = 20
+# Groq API timeout (seconds) — v4: 20 → 8 (kam hang duration)
+GROQ_TIMEOUT = 8
 
 
 # ===========================
@@ -94,12 +105,70 @@ def _is_groq_available():
 
 
 # ===========================
-# CACHED LLM
+# HARD TIMEOUT HELPER (v5 — critical fix)
 # ===========================
-@st.cache_resource(show_spinner=False)
+def _invoke_with_hard_timeout(chain, inputs, timeout_seconds):
+    """
+    v5 FIX: ChatGroq ka `timeout=8` network-level stuck pe reliable nahi hai
+    (TCP connect hang, DNS issue, network blackhole, firewall drop, etc.
+    mein wo silently ignore ho jaata hai). Isliye chain.invoke() ko ek
+    daemon thread mein chalate hain aur join(timeout) se HARD deadline
+    enforce karte hain.
+
+    Guarantees:
+      - Function hamesha `timeout_seconds` ke andar return karta hai
+      - Streamlit ka main thread kabhi block nahi hota
+      - Timeout ke baad worker thread ko abandon kar dete hain — daemon
+        hone ki wajah se process exit pe automatically mar jaayega
+
+    Args:
+        chain: LangChain runnable chain (prompt | llm)
+        inputs: dict of prompt input variables
+        timeout_seconds: hard deadline (int/float)
+
+    Returns:
+        (response, None)     — success
+        (None, TimeoutError) — timed out (abandoned)
+
+    Raises:
+        Jo bhi exception worker thread mein aayi (real errors ke liye)
+        — taaki caller apne normal except block se handle kar sake
+    """
+    result = {"value": None, "error": None}
+
+    def _worker():
+        try:
+            result["value"] = chain.invoke(inputs)
+        except BaseException as e:  # BaseException bhi catch — KeyboardInterrupt safe
+            result["error"] = e
+
+    t = threading.Thread(target=_worker, daemon=True, name="groq_invoke")
+    t.start()
+    t.join(timeout=timeout_seconds)
+
+    if t.is_alive():
+        # Thread abhi bhi chal raha hai — abandon karo. Daemon thread hai,
+        # process exit pe automatically die ho jaayega. Streamlit hang nahi hoga.
+        return None, TimeoutError(
+            f"LLM call exceeded hard {timeout_seconds}s timeout"
+        )
+
+    if result["error"] is not None:
+        raise result["error"]
+    return result["value"], None
+
+
+# ===========================
+# LLM & PROMPT (v4: no caching)
+# ===========================
 def _get_cached_llm():
     """
-    ChatGroq instance cached — har call pe naya object nahi.
+    v4 FIX: @st.cache_resource hataa diya — ye Streamlit ke cache system ke
+    saath conflict karta tha aur pehli call pe app hang kar deta tha.
+    Ab har call pe naya ChatGroq instance banta hai (fast — sirf object
+    creation hai, koi network call nahi).
+
+    Naam `_get_cached_llm` hi rakha taaki existing callers na tootein.
     Returns None if not available.
     """
     if not _is_groq_available():
@@ -116,9 +185,11 @@ def _get_cached_llm():
         return None
 
 
-@st.cache_resource(show_spinner=False)
 def _get_cached_prompt():
-    """Cached ChatPromptTemplate (rebuild cost avoid)."""
+    """
+    v4 FIX: @st.cache_resource hataa diya.
+    ChatPromptTemplate har call pe banta hai — bahut sasta operation.
+    """
     return ChatPromptTemplate.from_messages([
         ("system", "{system_prompt}"),
         ("human",
@@ -167,7 +238,16 @@ def explain_scheme_ai(scheme_name, description, benefits, lang_choice,
 
     try:
         chain = prompt | llm
-        response = chain.invoke(inputs)
+        # v5 FIX: hard thread timeout — guaranteed return within GROQ_TIMEOUT
+        # seconds, chahe network kitna bhi stuck ho. Isse Streamlit ka main
+        # thread block nahi hota, aur sidebar/other buttons responsive
+        # rehte hain.
+        response, timeout_err = _invoke_with_hard_timeout(
+            chain, inputs, GROQ_TIMEOUT
+        )
+        if timeout_err is not None:
+            print(f"[simple_explain] AI timed out: {timeout_err}")
+            return None, "AI timed out"
         text = _safe_str(getattr(response, "content", None), "").strip()
         if not text:
             return None, "Empty AI response"
@@ -240,10 +320,12 @@ def explain_scheme(scheme_name, description, benefits, lang_choice,
     Main explanation function.
 
     Priority:
-      1. AI (if configured)
+      1. AI (if configured) — with HARD timeout (v5), never hangs
       2. Template-based fallback
 
     Never returns an error string — hamesha usable explanation deta hai.
+    Never hangs — chahe network stuck ho, GROQ_TIMEOUT (8s) ke andar
+    return ho jaata hai.
     """
     # Try AI first
     ai_text, ai_error = explain_scheme_ai(
@@ -262,7 +344,7 @@ def explain_scheme(scheme_name, description, benefits, lang_choice,
     if ai_text:
         return ai_text
 
-    # AI unavailable or failed → template fallback
+    # AI unavailable / timed out / failed → template fallback
     # Note: ai_error me specific reason hai — caller chahe to log/display kar sakta hai
     return explain_scheme_text(
         scheme_name=scheme_name,
@@ -307,7 +389,7 @@ def get_ai_status():
 # ===========================
 if __name__ == "__main__":
     print("=" * 60)
-    print("simple_explain.py — Verification")
+    print("simple_explain.py — Verification (v5)")
     print("=" * 60)
 
     # Test 1: AI status
@@ -403,6 +485,76 @@ if __name__ == "__main__":
     assert avail == expected
     print(f"  ✅ {avail} (HAS_GROQ={HAS_GROQ}, API_KEY={'set' if GROQ_API_KEY else 'missing'})")
 
+    # ---- v5 NEW TESTS ----
+    # Test 11: _invoke_with_hard_timeout — fast success path
+    print("\n[Test 11] v5 — _invoke_with_hard_timeout fast path:")
+
+    class _FakeResponse:
+        def __init__(self, content):
+            self.content = content
+
+    class _FastChain:
+        def invoke(self, inputs):
+            return _FakeResponse("Fast result")
+
+    resp, err = _invoke_with_hard_timeout(_FastChain(), {"x": 1}, timeout_seconds=2)
+    assert err is None, f"Unexpected timeout: {err}"
+    assert resp is not None and resp.content == "Fast result"
+    print(f"  ✅ Fast chain returned in time: {resp.content!r}")
+
+    # Test 12: _invoke_with_hard_timeout — slow chain MUST time out hard
+    print("\n[Test 12] v5 — _invoke_with_hard_timeout HARD timeout (critical fix):")
+    import time as _time
+
+    class _SlowChain:
+        def invoke(self, inputs):
+            _time.sleep(30)  # Simulates a network-hung LLM call
+            return _FakeResponse("Should never arrive")
+
+    t_start = _time.time()
+    resp, err = _invoke_with_hard_timeout(_SlowChain(), {"x": 1}, timeout_seconds=2)
+    t_elapsed = _time.time() - t_start
+
+    assert resp is None, "Slow chain should NOT return a response"
+    assert isinstance(err, TimeoutError), f"Expected TimeoutError, got {type(err)}"
+    assert t_elapsed < 4, f"HARD timeout failed — took {t_elapsed:.2f}s (expected <4s)"
+    print(f"  ✅ Slow chain abandoned after {t_elapsed:.2f}s (timeout=2s) — no hang!")
+
+    # Test 13: _invoke_with_hard_timeout — real exception propagation
+    print("\n[Test 13] v5 — _invoke_with_hard_timeout exception propagation:")
+
+    class _CrashChain:
+        def invoke(self, inputs):
+            raise ValueError("Simulated API error")
+
+    try:
+        _invoke_with_hard_timeout(_CrashChain(), {"x": 1}, timeout_seconds=2)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "Simulated API error" in str(e)
+        print(f"  ✅ Exception propagated correctly: {e}")
+
+    # Test 14: explain_scheme() worst case — hung LLM must NOT hang caller
+    print("\n[Test 14] v5 — explain_scheme() worst-case hang test:")
+    # Temporarily monkey-patch explain_scheme_ai to simulate a hang — but
+    # we can't actually hang here. Instead, verify that explain_scheme
+    # correctly falls back when explain_scheme_ai returns (None, error).
+    original_ai = explain_scheme_ai
+    try:
+        def _fake_hung_ai(*args, **kwargs):
+            # Simulates what the v5 fix produces after a hard timeout
+            return None, "AI timed out"
+
+        globals()["explain_scheme_ai"] = _fake_hung_ai
+        text = explain_scheme(
+            "Test", "Desc", "Ben", "English", "Cat", "All", "", "", True, 0,
+        )
+        assert isinstance(text, str) and len(text) > 0
+        assert "Test" in text  # Template fallback should include scheme name
+        print(f"  ✅ Fallback worked after simulated timeout: {text[:60]}...")
+    finally:
+        globals()["explain_scheme_ai"] = original_ai
+
     print("\n" + "=" * 60)
-    print("✅ simple_explain.py — ALL CHECKS PASSED")
+    print("✅ simple_explain.py v5 — ALL CHECKS PASSED")
     print("=" * 60)

@@ -398,7 +398,7 @@ def _build_corpus(df):
 # similarity ke result par iska koi asar nahi padta: query ke wo
 # character n-grams jo corpus me kahin bhi nahi hain, unka corpus
 # vectors me weight pehle bhi 0 hi tha.
-@st.cache_resource(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def _get_or_build_tfidf_index(df):
     """Returns (vectorizer, tfidf_matrix, corpus) fit once per dataset, cached."""
     corpus = _build_corpus(df)
