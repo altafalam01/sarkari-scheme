@@ -1,14 +1,18 @@
 """
 reminders.py — Reminders persistence (local JSON file).
 
-PERFORMANCE (v2):
-  - load_reminders() ab @st.cache_data se cached hai (2 sec TTL).
-  - Ye OneDrive ki slow I/O problem solve karta hai.
+PERFORMANCE (v3):
+  - load_reminders() ab @st.cache_data se cached hai (60 sec TTL).
+    Pehle 2 sec tha — paginated rendering mein kaafi nahi tha.
+  - _save() ab actually atomic hai (temp file + os.replace).
+    Pehle docstring "atomic" bolta tha lekin seedha file mein likhta
+    tha — interruption se file corrupt ho sakti thi. Ab fix.
   - Har save ke baad cache automatically clear ho jaata hai.
 """
 
 import json
 import os
+import tempfile
 import datetime
 import streamlit as st
 
@@ -18,10 +22,10 @@ REMINDERS_FILE = os.path.join("data", "reminders.json")
 # ===========================
 # SAFE LOAD (CACHED)
 # ===========================
-@st.cache_data(ttl=2, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_reminders():
     """
-    Saare reminders load karta hai (cached for 2 seconds).
+    Saare reminders load karta hai (cached for 60 seconds).
     Returns: dict {scheme_name: {"date": "YYYY-MM-DD", "note": "..."}}
     """
     if not os.path.exists(REMINDERS_FILE):
@@ -46,8 +50,20 @@ def _save(data):
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
 
-    with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # ✅ Temp file + os.replace = atomic write (favorites.py jaisa)
+    dir_path = parent_dir or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".rem_", suffix=".tmp", dir=dir_path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, REMINDERS_FILE)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
     # ✅ Cache clear karo taaki next read fresh ho
     load_reminders.clear()

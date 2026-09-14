@@ -8,10 +8,13 @@ FIXES (v2):
   - Non-string scheme names filter ho jaate hain.
   - Real data ke saath test nahi karta __main__ me.
 
-PERFORMANCE (v3):
-  - load_favorites() ab @st.cache_data se cached hai (2 sec TTL).
-  - Ye OneDrive ki slow I/O problem solve karta hai.
+PERFORMANCE (v4):
+  - load_favorites() ab @st.cache_data se cached hai (60 sec TTL).
+    Pehle 2 sec tha — paginated rendering mein 2 sec kaafi nahi tha,
+    isliye 60 kar diya. Ye OneDrive ki slow I/O problem solve karta hai.
   - Har save ke baad cache automatically clear ho jaata hai.
+  - app.py ab is function ko loop ke bahar ek baar call karta hai aur
+    sab cards mein pass karta hai (render_scheme_card ke through).
 """
 
 import json
@@ -25,10 +28,10 @@ FAV_FILE = os.path.join("data", "favorites.json")
 # ===========================
 # SAFE LOAD (CACHED)
 # ===========================
-@st.cache_data(ttl=2, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_favorites():
     """
-    Favorites list load karta hai (cached for 2 seconds).
+    Favorites list load karta hai (cached for 60 seconds).
     - File missing → []
     - Corrupt JSON → []  (crash nahi karta, purana data move ho jaata hai)
     - Non-list content → []

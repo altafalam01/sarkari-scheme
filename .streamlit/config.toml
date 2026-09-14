@@ -1,18 +1,5 @@
-# ===========================
-# Streamlit Secrets Configuration
-# ===========================
-# Ye file .streamlit/secrets.toml mein rakhi jaati hai.
-# Aapki .env file ke same values yahan daal do taaki Streamlit
-# "No secrets found" warning na dikhaye.
-
-# Admin Panel password (for admin authentication)
-ADMIN_PASSWORD = "Altaf@123"
-
-# Groq API Key (for AI features — chatbot, simple explain, voice assistant)
-GROQ_API_KEY = "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"
-
-# Groq Model Name
-GROQ_MODEL_NAME = "openai/gpt-oss-20b"
-
-# App URL (used for share links)
-APP_URL = "http://localhost:8501"
+[theme]
+base = "dark"
+primaryColor = "#00E5FF"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1C2333"

@@ -3,14 +3,21 @@ app.py — Main entry point for Sarkari Scheme Finder.
 
 Multi-mode Streamlit app with 13 sidebar modes.
 
-FIXES (v7):
-  - CRITICAL: Stray `st.rerun()` line removed from before render_scheme_card()
-    — ye infinite loop bana raha tha jisse sidebar buttons aur "Explain Simply"
-    dono kaam nahi kar rahe the.
-  - All `st.rerun(scope="fragment")` calls changed to `st.rerun()` — since
-    @st.fragment decorator is removed, fragment-scoped rerun would error silently.
-  - v6, v5 ke saare fixes intact: submitted boolean, NameErrors, atomic writes,
-    corrupt JSON quarantine, get_deadline_status safety, set_page_config.
+PERFORMANCE FIXES (v8):
+  - Desktop pagination added (pehle sirf mobile ke liye thi). Ab 105 schemes
+    ek saath render nahi honge — sirf 10 dikhenge, "Load More" se agle 10.
+    Isse Streamlit ka WebSocket connection time out nahi hota aur
+    "Bad message format" error nahi aata.
+  - Disk I/O loop se bahar nikala: apps/favs/reminders ab ek baar load
+    hote hain (render_scheme_card ke bahar), phir sab cards mein pass
+    hote hain. Pehle har card ke liye 3 file reads ho rahi thi
+    (105 cards × 3 = 315 reads). Ab sirf 3 reads per page.
+  - render_scheme_card mein apps/favs/reminders optional params hain —
+    agar pass na hon to wo khud load kar leta hai (backward compatible).
+
+FIXES (v7, inherited):
+  - Stray `st.rerun()` removed, all fragment-scoped reruns changed to st.rerun().
+  - v6, v5 ke saare fixes intact.
 """
 
 import base64
@@ -72,9 +79,7 @@ LOGO_B64 = get_logo_base64()
 
 
 # ===========================
-# PAGE CONFIG — MUST BE THE VERY FIRST STREAMLIT CALL
-# (v1.40.2 mein st.secrets bhi ek "command" count hota hai,
-#  isliye ye pehle aana chahiye)
+# PAGE CONFIG
 # ===========================
 st.set_page_config(
     page_title="Sarkari Scheme",
@@ -85,10 +90,7 @@ st.set_page_config(
 
 
 # ===========================
-# APP URL — environment variable se, warna default.
-# st.secrets skip kar rahe hain kyunki secrets.toml nahi hai,
-# aur usse "No secrets found" warning aati hai Streamlit 1.40 mein.
-# Agar future mein Streamlit Cloud pe deploy karo, to secrets use kar sakte ho.
+# APP URL
 # ===========================
 APP_URL = os.environ.get("APP_URL", "https://sarkari-scheme.streamlit.app")
 
@@ -148,7 +150,7 @@ def get_deadline_status(deadline):
     if days_left < 0:
         return days_left, "Expired", "#FF4757"
     elif days_left == 0:
-        return 0, "Due today", "#FF4757"
+        return days_left, "Due today", "#FF4757"
     elif days_left <= 7:
         return days_left, f"{days_left} days left", "#FF9933"
     elif days_left <= 30:
@@ -226,7 +228,9 @@ def save_user_profile(profile):
         print(f"[app.py] save_user_profile failed: {e}")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_applications():
+    """Applications cached (60s TTL). Har card ke liye disk read nahi."""
     return _load_json_safe(APPLICATIONS_FILE, dict)
 
 
@@ -237,6 +241,8 @@ def save_application(scheme_name, status):
     apps[str(scheme_name)] = str(status)
     try:
         _atomic_json_write(APPLICATIONS_FILE, apps)
+        # ✅ Cache clear karo taaki next read fresh ho
+        load_applications.clear()
     except Exception as e:
         print(f"[app.py] save_application failed: {e}")
 
@@ -579,12 +585,10 @@ if "glow_trail_injected" not in st.session_state:
 
 
 # ===========================
-# AUTO-SCRAPING — DISABLED ON STARTUP (performance fix)
+# AUTO-SCRAPING — DISABLED ON STARTUP
 # ===========================
-# Scraping startup pe NAHI chalega. Sirf Admin Panel se manually trigger hoga.
 if "auto_scraping_checked" not in st.session_state:
     st.session_state.auto_scraping_checked = True
-    # Auto-scraping startup pe disabled hai — Admin Panel se manual trigger
     pass
 
 
@@ -721,6 +725,8 @@ with st.sidebar:
             st.session_state.sidebar_income = annual_income
             st.session_state.sidebar_state = state
             st.session_state.form_submitted = True
+            # ✅ Naya search — pagination reset karo
+            st.session_state.form_page = 1
             st.session_state.scroll_to_results = True
             st.rerun()
 
@@ -758,21 +764,32 @@ with st.sidebar:
 # ===========================
 # SCHEME CARD
 # ===========================
-# v7 FIX: @st.fragment decorator removed — fragment ke andar rerun stuck ho jaata
-# tha, jisse buttons (especially "Explain Simply" aur sidebar) respond nahi karte the.
-# Ab poora page rerun hota hai, jo reliable hai (thoda slow, lekin kaam karta hai).
-def render_scheme_card(r, t, key_prefix, lang_choice):
+# v8 PERFORMANCE: apps/favs/reminders ab optional params hain.
+# Caller (e.g. _render_eligibility_mode) ek baar load karke sab cards
+# mein pass karta hai — loop ke andar har card ke liye disk read nahi hoti.
+# Agar caller pass na kare, to fallback ke taur par khud load kar leta hai
+# (backward compatible).
+def render_scheme_card(r, t, key_prefix, lang_choice,
+                        apps=None, favs=None, reminders=None):
     if not isinstance(r, dict):
         return
 
-    apps = load_applications()
+    # ✅ Fallback: agar caller ne pass nahi kiya, to yahan load karo
+    if apps is None:
+        apps = load_applications()
+    if favs is None:
+        favs = favorites_module.load_favorites()
+    if reminders is None:
+        reminders = reminders_module.load_reminders()
+
     scheme_name = safe_str(r.get("scheme_name"))
     category_type = safe_str(r.get("category_type"))
     applicable_state = safe_str(r.get("applicable_state"))
     description = safe_str(r.get("description"))
     benefits = safe_str(r.get("benefits"))
     apply_link = safe_str(r.get("apply_link"))
-    is_fav = favorites_module.is_favorite(scheme_name)
+    # ✅ In-memory check (pehle disk read hota tha)
+    is_fav = scheme_name in favs
 
     extra_badge = ""
     card_class = ""
@@ -891,6 +908,7 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
                 st.code(apply_link, language=None)
                 st.toast("✅ Official Site Link: " + apply_link)
 
+    # ==================== EXPANDER 1: Application Status ====================
     with st.expander(t["app_status_label"]):
         current_status = apps.get(scheme_name, "Not Applied")
         status_options = ["Not Applied", "Applied", "Pending", "Rejected"]
@@ -912,12 +930,14 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
                 st.toast(t["app_status_updated_toast"])
                 st.rerun()
 
+    # ==================== EXPANDER 2: Eligibility Breakdown ====================
     if r.get("checks"):
         with st.expander(t["eligibility_breakdown"]):
             for c in r["checks"]:
                 icon = "✔" if c.get("passed") else "✘"
                 st.write(f"{icon} {html.escape(safe_str(c.get('label')))}")
 
+    # ==================== EXPANDER 3: Documents Required ====================
     with st.expander(t["documents_required_label"]):
         try:
             docs = doc_checklist.get_documents(
@@ -929,8 +949,10 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
         except Exception as e:
             st.caption(f"Could not load documents: {safe_str(e)[:80]}")
 
+    # ==================== EXPANDER 4: Reminder ====================
     with st.expander(t["reminder_label"]):
-        existing = reminders_module.get_reminder(scheme_name)
+        # ✅ In-memory check (pehle disk read hota tha)
+        existing = reminders.get(scheme_name, None)
         default_date = None
         if existing and existing.get("date"):
             try:
@@ -974,9 +996,7 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
                 st.toast(t["reminder_removed_toast"])
                 st.rerun()
 
-    # ===================================================================
-    # v6/v7 FIX: "Explain Simply" — ab properly output render karta hai
-    # ===================================================================
+    # ==================== EXPANDER 5: Explain Simply ====================
     with st.expander(t["explain_simply_label"]):
         explain_state_key = f"{key_prefix}_explain_{widget_key}"
         col1, col2 = st.columns([3, 1])
@@ -1002,7 +1022,6 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
                             score=r.get("score", 0),
                         )
                         st.session_state[explain_state_key] = simple_text
-                        # st.rerun() HATAYA — Streamlit naturally rerun karega
                     except Exception as e:
                         st.error(f"{t['explain_error']} {safe_str(e)[:120]}")
         with col2:
@@ -1030,9 +1049,6 @@ def render_scheme_card(r, t, key_prefix, lang_choice):
         if explain_state_key in st.session_state:
             st.markdown("---")
             st.markdown(f"### {t['explain_simple_title']}")
-            # FIX: LLM output markdown hai (jinme newlines hote hain).
-            # Unsafe HTML <div> mein daalna CommonMark Rule 6 ke wajah se
-            # toot jaata tha. Native container mein render karo.
             with st.container(border=True):
                 st.markdown(st.session_state[explain_state_key])
             st.markdown("---")
@@ -1372,6 +1388,7 @@ def _render_eligibility_mode():
                 st.session_state.form_eligible_count = 0
                 st.session_state.form_submitted = False
                 st.session_state.search_params = {}
+                st.session_state.form_page = 1
                 st.rerun()
 
         if results:
@@ -1390,27 +1407,53 @@ def _render_eligibility_mode():
                 st.warning(f"Could not build PDF: {safe_str(e)[:80]}")
 
             st.write("")
-            items_per_page = get_items_per_page()
+
+            # ============================================================
+            # v8 PERFORMANCE FIX: Desktop pagination + Disk I/O outside loop
+            # ============================================================
+            # Pehle: 105 cards ek saath render ho rahe the → Streamlit hang
+            # Ab: 10 cards per page, "Load More" se agle 10
+            # Saath hi apps/favs/reminders ek baar load karke pass kiye
+            # ja rahe hain (har card ke liye disk read nahi).
+            # ============================================================
+
+            # ✅ Pagination (desktop + mobile dono ke liye)
+            items_per_page = 5 if IS_MOBILE else 10
             total_results = len(results)
 
-            if IS_MOBILE and total_results > items_per_page:
-                for r in results[:items_per_page]:
-                    render_scheme_card(r, t, "form", lang_choice)
+            if "form_page" not in st.session_state:
+                st.session_state.form_page = 1
 
-                if "show_more_form" not in st.session_state:
-                    st.session_state.show_more_form = False
+            # Safety: agar filter change se results kam ho gaye, to page reset
+            max_page = max(1, (total_results + items_per_page - 1) // items_per_page)
+            if st.session_state.form_page > max_page:
+                st.session_state.form_page = max_page
 
-                if st.session_state.show_more_form:
-                    for r in results[items_per_page:]:
-                        render_scheme_card(r, t, "form", lang_choice)
-                else:
-                    if st.button(t["load_more_btn"], use_container_width=True,
-                                 key="form_load_more_btn"):
-                        st.session_state.show_more_form = True
-                        st.rerun()
+            start_idx = (st.session_state.form_page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+
+            # ✅ Ek baar load karo — loop ke andar disk read nahi
+            apps = load_applications()
+            favs = favorites_module.load_favorites()
+            reminders = reminders_module.load_reminders()
+
+            for r in results[start_idx:end_idx]:
+                render_scheme_card(
+                    r, t, "form", lang_choice,
+                    apps=apps, favs=favs, reminders=reminders,
+                )
+
+            # Load More / Pagination Info
+            if end_idx < total_results:
+                showing_text = f"Showing {start_idx + 1}–{end_idx} of {total_results}"
+                st.caption(showing_text)
+                if st.button(t["load_more_btn"], use_container_width=True,
+                             key="form_load_more_btn"):
+                    st.session_state.form_page += 1
+                    st.rerun()
             else:
-                for r in results:
-                    render_scheme_card(r, t, "form", lang_choice)
+                if total_results > items_per_page:
+                    st.caption(f"✅ All {total_results} results loaded.")
         else:
             st.info(t["no_results"])
 
@@ -1477,6 +1520,8 @@ def _handle_form_submission():
             "State": state_val,
             "Category": category_val,
         }
+        # ✅ Naya search — pagination reset
+        st.session_state.form_page = 1
 
 
 _handle_form_submission()
@@ -1530,6 +1575,8 @@ def _render_nl_mode():
                 })
             except Exception:
                 pass
+            # ✅ Naya search — pagination reset
+            st.session_state.nl_page = 1
 
         if results:
             st.success(f"{len(results)} {t['nl_matches_found']}")
@@ -1547,26 +1594,43 @@ def _render_nl_mode():
                 st.warning(f"Could not build PDF: {safe_str(e)[:80]}")
 
             st.write("")
-            items_per_page = get_items_per_page()
 
-            if IS_MOBILE and len(results) > items_per_page:
-                for r in results[:items_per_page]:
-                    render_scheme_card(r, t, "nl", lang_choice)
+            # ============================================================
+            # v8 PERFORMANCE FIX: Desktop pagination for NL mode too
+            # ============================================================
+            items_per_page = 5 if IS_MOBILE else 8
+            total_results = len(results)
 
-                if "show_more_nl" not in st.session_state:
-                    st.session_state.show_more_nl = False
+            if "nl_page" not in st.session_state:
+                st.session_state.nl_page = 1
 
-                if st.session_state.show_more_nl:
-                    for r in results[items_per_page:]:
-                        render_scheme_card(r, t, "nl", lang_choice)
-                else:
-                    if st.button(t["load_more_btn"], use_container_width=True,
-                                 key="nl_load_more_btn"):
-                        st.session_state.show_more_nl = True
-                        st.rerun()
+            max_page = max(1, (total_results + items_per_page - 1) // items_per_page)
+            if st.session_state.nl_page > max_page:
+                st.session_state.nl_page = max_page
+
+            start_idx = (st.session_state.nl_page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+
+            # ✅ Ek baar load karo — loop ke andar disk read nahi
+            apps = load_applications()
+            favs = favorites_module.load_favorites()
+            reminders = reminders_module.load_reminders()
+
+            for r in results[start_idx:end_idx]:
+                render_scheme_card(
+                    r, t, "nl", lang_choice,
+                    apps=apps, favs=favs, reminders=reminders,
+                )
+
+            if end_idx < total_results:
+                st.caption(f"Showing {start_idx + 1}–{end_idx} of {total_results}")
+                if st.button(t["load_more_btn"], use_container_width=True,
+                             key="nl_load_more_btn"):
+                    st.session_state.nl_page += 1
+                    st.rerun()
             else:
-                for r in results:
-                    render_scheme_card(r, t, "nl", lang_choice)
+                if total_results > items_per_page:
+                    st.caption(f"✅ All {total_results} results loaded.")
         else:
             st.info(t["nl_no_results"])
     else:
@@ -1583,6 +1647,12 @@ def _render_favorites_mode():
         return
 
     fav_rows = df[df["scheme_name"].isin(fav_names)].sort_values("scheme_name")
+
+    # ✅ Ek baar load karo — loop ke andar disk read nahi
+    apps = load_applications()
+    favs = favorites_module.load_favorites()
+    reminders = reminders_module.load_reminders()
+
     for _, row in fav_rows.iterrows():
         r = {
             "scheme_name": row["scheme_name"],
@@ -1594,7 +1664,10 @@ def _render_favorites_mode():
             "deadline": row.get("deadline", None),
             "form_link": row.get("form_link", None),
         }
-        render_scheme_card(r, t, key_prefix="fav", lang_choice=lang_choice)
+        render_scheme_card(
+            r, t, key_prefix="fav", lang_choice=lang_choice,
+            apps=apps, favs=favs, reminders=reminders,
+        )
 
 
 def _render_reminders_mode():
