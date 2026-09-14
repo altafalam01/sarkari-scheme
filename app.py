@@ -3,21 +3,15 @@ app.py — Main entry point for Sarkari Scheme Finder.
 
 Multi-mode Streamlit app with 13 sidebar modes.
 
-PERFORMANCE FIXES (v8):
-  - Desktop pagination added (pehle sirf mobile ke liye thi). Ab 105 schemes
-    ek saath render nahi honge — sirf 10 dikhenge, "Load More" se agle 10.
-    Isse Streamlit ka WebSocket connection time out nahi hota aur
-    "Bad message format" error nahi aata.
-  - Disk I/O loop se bahar nikala: apps/favs/reminders ab ek baar load
-    hote hain (render_scheme_card ke bahar), phir sab cards mein pass
-    hote hain. Pehle har card ke liye 3 file reads ho rahi thi
-    (105 cards × 3 = 315 reads). Ab sirf 3 reads per page.
-  - render_scheme_card mein apps/favs/reminders optional params hain —
-    agar pass na hon to wo khud load kar leta hai (backward compatible).
+NEW FEATURE (v11):
+  - "My Documents" mode with OCR auto-fill — user apna Aadhaar/PAN
+    ki photo upload kar sakta hai aur OCR se data extract ho jaata hai.
+  - Bookmarklet bhi generate hota hai — kisi bhi govt site par auto-fill
+    ke liye.
 
-FIXES (v7, inherited):
-  - Stray `st.rerun()` removed, all fragment-scoped reruns changed to st.rerun().
-  - v6, v5 ke saare fixes intact.
+FIX v11.1:
+  - _render_documents_mode() mein Bookmarklet section duplicate ho gaya tha,
+    use hata diya. Ab page par bookmarklet sirf ek baar dikhega.
 """
 
 import base64
@@ -40,6 +34,7 @@ from admin_panel import render_admin_panel
 import history as history_module
 import favorites as favorites_module
 import reminders as reminders_module
+import documents_vault
 import faq as faq_module
 import doc_checklist
 import pdf_export
@@ -138,7 +133,6 @@ def calculate_eligible_score(r):
 
 
 def get_deadline_status(deadline):
-    """Invalid/missing → (None, None, None). Chip hide ho jaayega."""
     if not deadline:
         return None, None, None
     try:
@@ -230,7 +224,6 @@ def save_user_profile(profile):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_applications():
-    """Applications cached (60s TTL). Har card ke liye disk read nahi."""
     return _load_json_safe(APPLICATIONS_FILE, dict)
 
 
@@ -241,7 +234,6 @@ def save_application(scheme_name, status):
     apps[str(scheme_name)] = str(status)
     try:
         _atomic_json_write(APPLICATIONS_FILE, apps)
-        # ✅ Cache clear karo taaki next read fresh ho
         load_applications.clear()
     except Exception as e:
         print(f"[app.py] save_application failed: {e}")
@@ -511,12 +503,14 @@ with st.sidebar:
     lang_choice = st.session_state.lang_choice
     t = get_text(lang_choice)
 
+    st.markdown(f"**{t['theme_label']}**")
     st.radio(
         t["theme_label"],
         [t["theme_dark"], t["theme_light"]],
         horizontal=True,
         key="_theme_widget",
         on_change=on_theme_change,
+        label_visibility="collapsed",
     )
     theme_choice = st.session_state.theme_choice
 
@@ -555,7 +549,7 @@ apply_theme(theme_choice, C, t)
 
 
 # ===========================
-# GLOW TRAIL (inject once)
+# GLOW TRAIL
 # ===========================
 if "glow_trail_injected" not in st.session_state:
     try:
@@ -585,7 +579,7 @@ if "glow_trail_injected" not in st.session_state:
 
 
 # ===========================
-# AUTO-SCRAPING — DISABLED ON STARTUP
+# AUTO-SCRAPING
 # ===========================
 if "auto_scraping_checked" not in st.session_state:
     st.session_state.auto_scraping_checked = True
@@ -621,28 +615,34 @@ with st.sidebar:
 
     if st.session_state.get("qa_navigate_to"):
         target_mode = st.session_state.qa_navigate_to
+        if target_mode == t["mode_reminders"]:
+            target_mode = t["mode_notifications"]
         mode_options = [
-            t["mode_form"], t["mode_nl"], t["mode_favorites"], t["mode_reminders"],
-            t["mode_history"], t["mode_faq"], t["mode_csc"], t["mode_dashboard"],
-            t["mode_settings"], t["mode_notifications"], t["mode_admin"],
-            t["mode_assistant"], t["mode_voice_assistant"],
+            t["mode_form"], t["mode_assistant"], t["mode_voice_assistant"],
+            t["mode_documents"],
+            t["mode_nl"], t["mode_favorites"], t["mode_history"],
+            t["mode_csc"], t["mode_faq"], t["mode_notifications"],
+            t["mode_dashboard"], t["mode_settings"], t["mode_admin"],
         ]
         if target_mode in mode_options:
             st.session_state["_search_mode_widget"] = target_mode
             st.session_state.scroll_to_results = True
         st.session_state.qa_navigate_to = None
 
+    st.markdown(f"**{t['mode_label']}**")
     search_mode = st.radio(
         t["mode_label"],
         [
-            t["mode_form"], t["mode_nl"], t["mode_favorites"], t["mode_reminders"],
-            t["mode_history"], t["mode_faq"], t["mode_csc"], t["mode_dashboard"],
-            t["mode_settings"], t["mode_notifications"], t["mode_admin"],
-            t["mode_assistant"], t["mode_voice_assistant"],
+            t["mode_form"], t["mode_assistant"], t["mode_voice_assistant"],
+            t["mode_documents"],
+            t["mode_nl"], t["mode_favorites"], t["mode_history"],
+            t["mode_csc"], t["mode_faq"], t["mode_notifications"],
+            t["mode_dashboard"], t["mode_settings"], t["mode_admin"],
         ],
         horizontal=False,
         key="_search_mode_widget",
         on_change=on_mode_change,
+        label_visibility="collapsed",
     )
 
     st.divider()
@@ -725,7 +725,6 @@ with st.sidebar:
             st.session_state.sidebar_income = annual_income
             st.session_state.sidebar_state = state
             st.session_state.form_submitted = True
-            # ✅ Naya search — pagination reset karo
             st.session_state.form_page = 1
             st.session_state.scroll_to_results = True
             st.rerun()
@@ -764,17 +763,11 @@ with st.sidebar:
 # ===========================
 # SCHEME CARD
 # ===========================
-# v8 PERFORMANCE: apps/favs/reminders ab optional params hain.
-# Caller (e.g. _render_eligibility_mode) ek baar load karke sab cards
-# mein pass karta hai — loop ke andar har card ke liye disk read nahi hoti.
-# Agar caller pass na kare, to fallback ke taur par khud load kar leta hai
-# (backward compatible).
 def render_scheme_card(r, t, key_prefix, lang_choice,
                         apps=None, favs=None, reminders=None):
     if not isinstance(r, dict):
         return
 
-    # ✅ Fallback: agar caller ne pass nahi kiya, to yahan load karo
     if apps is None:
         apps = load_applications()
     if favs is None:
@@ -788,7 +781,6 @@ def render_scheme_card(r, t, key_prefix, lang_choice,
     description = safe_str(r.get("description"))
     benefits = safe_str(r.get("benefits"))
     apply_link = safe_str(r.get("apply_link"))
-    # ✅ In-memory check (pehle disk read hota tha)
     is_fav = scheme_name in favs
 
     extra_badge = ""
@@ -908,7 +900,6 @@ def render_scheme_card(r, t, key_prefix, lang_choice,
                 st.code(apply_link, language=None)
                 st.toast("✅ Official Site Link: " + apply_link)
 
-    # ==================== EXPANDER 1: Application Status ====================
     with st.expander(t["app_status_label"]):
         current_status = apps.get(scheme_name, "Not Applied")
         status_options = ["Not Applied", "Applied", "Pending", "Rejected"]
@@ -930,14 +921,12 @@ def render_scheme_card(r, t, key_prefix, lang_choice,
                 st.toast(t["app_status_updated_toast"])
                 st.rerun()
 
-    # ==================== EXPANDER 2: Eligibility Breakdown ====================
     if r.get("checks"):
         with st.expander(t["eligibility_breakdown"]):
             for c in r["checks"]:
                 icon = "✔" if c.get("passed") else "✘"
                 st.write(f"{icon} {html.escape(safe_str(c.get('label')))}")
 
-    # ==================== EXPANDER 3: Documents Required ====================
     with st.expander(t["documents_required_label"]):
         try:
             docs = doc_checklist.get_documents(
@@ -949,9 +938,7 @@ def render_scheme_card(r, t, key_prefix, lang_choice,
         except Exception as e:
             st.caption(f"Could not load documents: {safe_str(e)[:80]}")
 
-    # ==================== EXPANDER 4: Reminder ====================
     with st.expander(t["reminder_label"]):
-        # ✅ In-memory check (pehle disk read hota tha)
         existing = reminders.get(scheme_name, None)
         default_date = None
         if existing and existing.get("date"):
@@ -996,7 +983,6 @@ def render_scheme_card(r, t, key_prefix, lang_choice,
                 st.toast(t["reminder_removed_toast"])
                 st.rerun()
 
-    # ==================== EXPANDER 5: Explain Simply ====================
     with st.expander(t["explain_simply_label"]):
         explain_state_key = f"{key_prefix}_explain_{widget_key}"
         col1, col2 = st.columns([3, 1])
@@ -1178,6 +1164,7 @@ def _render_quick_actions():
     if search_mode in [
         t["mode_dashboard"], t["mode_admin"],
         t["mode_settings"], t["mode_notifications"],
+        t["mode_documents"],
     ]:
         return
 
@@ -1307,40 +1294,198 @@ def _render_quick_actions():
 # ===========================
 def show_notifications():
     st.markdown('<div class="mode-content-anchor"></div>', unsafe_allow_html=True)
-    st.markdown(f"### {t['notif_title']}")
+    st.markdown(f"### {t['alerts_page_title']}")
+    st.caption(t['alerts_page_caption'])
 
     all_reminders = reminders_module.load_reminders()
-    if all_reminders:
-        st.markdown(f"#### {t['notif_reminders']}")
+    fav_names = favorites_module.load_favorites()
+    notif_df = load_schemes()
+    fav_schemes = (
+        notif_df[notif_df["scheme_name"].isin(fav_names)]
+        if fav_names else notif_df.iloc[0:0]
+    )
+
+    deadline_alerts = []
+    for _, row in fav_schemes.iterrows():
+        if row.get("deadline") and pd.notna(row.get("deadline")):
+            days_left, status_text, color = get_deadline_status(row["deadline"])
+            if days_left is not None and days_left <= 30 and status_text:
+                deadline_alerts.append({
+                    "scheme_name": safe_str(row["scheme_name"]),
+                    "category_type": safe_str(row.get("category_type", "")),
+                    "applicable_state": safe_str(row.get("applicable_state", "")),
+                    "deadline": row["deadline"],
+                    "days_left": days_left,
+                    "status_text": status_text,
+                    "color": color,
+                })
+    deadline_alerts.sort(key=lambda x: x["days_left"])
+
+    tab_rem, tab_dead, tab_all = st.tabs([
+        t["alerts_tab_reminders"],
+        t["alerts_tab_deadlines"],
+        t["alerts_tab_all"],
+    ])
+
+    with tab_rem:
+        if not all_reminders:
+            st.info(t["reminders_empty"])
+        else:
+            st.caption(t["reminders_disclaimer"])
+
+            items_per_page = 10
+            total = len(all_reminders)
+            if "alerts_rem_page" not in st.session_state:
+                st.session_state.alerts_rem_page = 1
+            max_page = max(1, (total + items_per_page - 1) // items_per_page)
+            if st.session_state.alerts_rem_page > max_page:
+                st.session_state.alerts_rem_page = max_page
+            start = (st.session_state.alerts_rem_page - 1) * items_per_page
+            end = start + items_per_page
+
+            sorted_items = sorted(
+                all_reminders.items(), key=lambda kv: kv[1].get("date", "")
+            )
+
+            for scheme_name, info in sorted_items[start:end]:
+                days = reminders_module.days_remaining(info.get("date", ""))
+                if days is None:
+                    continue
+
+                if days < 0:
+                    status_text = t["reminder_overdue"]; status_color = "#FF4757"
+                elif days == 0:
+                    status_text = t["reminder_today"]; status_color = "#FF4757"
+                elif days <= 7:
+                    status_text = t["reminder_due_soon"].format(days=days); status_color = "#FF9933"
+                else:
+                    status_text = t["reminder_upcoming"].format(days=days); status_color = "#00FF88"
+
+                note_html = (
+                    f'<p class="card-desc">{html.escape(info["note"])}</p>'
+                    if info.get("note") else ""
+                )
+
+                reminder_html = (
+                    '<div class="scheme-card">'
+                    f'<span class="chip" style="background-color:rgba(255,71,87,0.2); '
+                    f'color:{status_color}; border:1px solid {status_color};">'
+                    f'{html.escape(status_text)}</span>'
+                    f'<h4 style="margin:8px 0 4px 0;">{html.escape(scheme_name)}</h4>'
+                    f'<p class="card-desc"><b>{html.escape(t["set_reminder_label"])}:</b> '
+                    f'{html.escape(info["date"])}</p>'
+                    f'{note_html}</div>'
+                )
+                st.markdown(reminder_html, unsafe_allow_html=True)
+
+                if st.button(
+                    t["remove_reminder_btn"],
+                    key=f"alerts_rem_remove_{scheme_name}",
+                ):
+                    reminders_module.remove_reminder(scheme_name)
+                    st.toast(t["reminder_removed_toast"])
+                    st.rerun()
+                st.write("")
+
+            if end < total:
+                st.caption(f"Showing {start + 1}–{end} of {total}")
+                if st.button(t["alerts_load_more"], use_container_width=True,
+                             key="alerts_rem_load_more"):
+                    st.session_state.alerts_rem_page += 1
+                    st.rerun()
+
+    with tab_dead:
+        if not deadline_alerts:
+            if not fav_names:
+                st.info(t["notif_no_reminders"])
+            else:
+                st.success("✅ No urgent deadlines in your favorites right now!")
+        else:
+            st.markdown(f"##### {t['notif_favorites_deadlines']}")
+            for item in deadline_alerts:
+                color = item["color"]
+                status = item["status_text"]
+                name = item["scheme_name"]
+                st.markdown(
+                    '<div class="scheme-card">'
+                    f'<span class="chip" style="background-color:rgba(255,71,87,0.2); '
+                    f'color:{color}; border:1px solid {color};">'
+                    f'⚠️ {html.escape(status)}</span>'
+                    f'<h4 style="margin:8px 0 4px 0;">{html.escape(name)}</h4>'
+                    f'<p class="card-desc"><b>{html.escape(t["set_reminder_label"])}:</b> '
+                    f'{html.escape(item["deadline"])}</p>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+                st.write("")
+
+    with tab_all:
+        combined = []
+
         for scheme_name, info in all_reminders.items():
             days = reminders_module.days_remaining(info.get("date", ""))
             if days is None:
                 continue
             if days < 0:
-                st.error(f"❌ **{scheme_name}** - {t['notif_deadline_expired']} {info['date']}")
+                status_text = t["reminder_overdue"]; status_color = "#FF4757"
+            elif days == 0:
+                status_text = t["reminder_today"]; status_color = "#FF4757"
             elif days <= 7:
-                st.warning(
-                    f"⚠️ **{scheme_name}** - "
-                    f"{t['notif_due_in_days'].format(days=days)} ({info['date']})"
-                )
+                status_text = t["reminder_due_soon"].format(days=days); status_color = "#FF9933"
             else:
-                st.info(
-                    f"📅 **{scheme_name}** - "
-                    f"{t['notif_due_in_days'].format(days=days)} ({info['date']})"
-                )
-    else:
-        st.info(t["notif_no_reminders"])
+                status_text = t["reminder_upcoming"].format(days=days); status_color = "#00FF88"
+            combined.append({
+                "type": "reminder",
+                "name": scheme_name,
+                "days": days,
+                "status": status_text,
+                "color": status_color,
+                "date": info.get("date", ""),
+                "note": info.get("note", ""),
+            })
 
-    fav_names = favorites_module.load_favorites()
-    if fav_names:
-        notif_df = load_schemes()
-        fav_schemes = notif_df[notif_df["scheme_name"].isin(fav_names)]
-        st.markdown(f"#### {t['notif_favorites_deadlines']}")
-        for _, row in fav_schemes.iterrows():
-            if row.get("deadline") and pd.notna(row.get("deadline")):
-                days_left, status_text, color = get_deadline_status(row["deadline"])
-                if days_left is not None and status_text and days_left <= 7:
-                    st.warning(f"⚠️ **{safe_str(row['scheme_name'])}** - {status_text}")
+        existing_names = {c["name"] for c in combined}
+        for item in deadline_alerts:
+            if item["scheme_name"] in existing_names:
+                continue
+            combined.append({
+                "type": "deadline",
+                "name": item["scheme_name"],
+                "days": item["days_left"],
+                "status": item["status_text"],
+                "color": item["color"],
+                "date": item["deadline"],
+                "note": "",
+            })
+
+        combined.sort(key=lambda x: x["days"])
+
+        if not combined:
+            st.info(t["alerts_no_items"])
+        else:
+            urgent = sum(1 for c in combined if c["days"] <= 7)
+            if urgent > 0:
+                st.warning(
+                    "⚠️ " + t["alerts_urgent_count"].format(count=urgent)
+                )
+
+            for item in combined:
+                type_icon = "⏰" if item["type"] == "reminder" else "⭐"
+                note_html = (
+                    f'<p class="card-desc">{html.escape(item["note"])}</p>'
+                    if item["note"] else ""
+                )
+                st.markdown(
+                    '<div class="scheme-card">'
+                    f'<span class="chip" style="background-color:rgba(255,71,87,0.2); '
+                    f'color:{item["color"]}; border:1px solid {item["color"]};">'
+                    f'{type_icon} {html.escape(item["status"])}</span>'
+                    f'<h4 style="margin:8px 0 4px 0;">{html.escape(item["name"])}</h4>'
+                    f'<p class="card-desc"><b>Date:</b> {html.escape(item["date"])}</p>'
+                    f'{note_html}</div>',
+                    unsafe_allow_html=True,
+                )
+                st.write("")
 
 
 # ===========================
@@ -1408,23 +1553,12 @@ def _render_eligibility_mode():
 
             st.write("")
 
-            # ============================================================
-            # v8 PERFORMANCE FIX: Desktop pagination + Disk I/O outside loop
-            # ============================================================
-            # Pehle: 105 cards ek saath render ho rahe the → Streamlit hang
-            # Ab: 10 cards per page, "Load More" se agle 10
-            # Saath hi apps/favs/reminders ek baar load karke pass kiye
-            # ja rahe hain (har card ke liye disk read nahi).
-            # ============================================================
-
-            # ✅ Pagination (desktop + mobile dono ke liye)
             items_per_page = 5 if IS_MOBILE else 10
             total_results = len(results)
 
             if "form_page" not in st.session_state:
                 st.session_state.form_page = 1
 
-            # Safety: agar filter change se results kam ho gaye, to page reset
             max_page = max(1, (total_results + items_per_page - 1) // items_per_page)
             if st.session_state.form_page > max_page:
                 st.session_state.form_page = max_page
@@ -1432,7 +1566,6 @@ def _render_eligibility_mode():
             start_idx = (st.session_state.form_page - 1) * items_per_page
             end_idx = start_idx + items_per_page
 
-            # ✅ Ek baar load karo — loop ke andar disk read nahi
             apps = load_applications()
             favs = favorites_module.load_favorites()
             reminders = reminders_module.load_reminders()
@@ -1443,7 +1576,6 @@ def _render_eligibility_mode():
                     apps=apps, favs=favs, reminders=reminders,
                 )
 
-            # Load More / Pagination Info
             if end_idx < total_results:
                 showing_text = f"Showing {start_idx + 1}–{end_idx} of {total_results}"
                 st.caption(showing_text)
@@ -1520,7 +1652,6 @@ def _handle_form_submission():
             "State": state_val,
             "Category": category_val,
         }
-        # ✅ Naya search — pagination reset
         st.session_state.form_page = 1
 
 
@@ -1575,7 +1706,6 @@ def _render_nl_mode():
                 })
             except Exception:
                 pass
-            # ✅ Naya search — pagination reset
             st.session_state.nl_page = 1
 
         if results:
@@ -1595,9 +1725,6 @@ def _render_nl_mode():
 
             st.write("")
 
-            # ============================================================
-            # v8 PERFORMANCE FIX: Desktop pagination for NL mode too
-            # ============================================================
             items_per_page = 5 if IS_MOBILE else 8
             total_results = len(results)
 
@@ -1611,7 +1738,6 @@ def _render_nl_mode():
             start_idx = (st.session_state.nl_page - 1) * items_per_page
             end_idx = start_idx + items_per_page
 
-            # ✅ Ek baar load karo — loop ke andar disk read nahi
             apps = load_applications()
             favs = favorites_module.load_favorites()
             reminders = reminders_module.load_reminders()
@@ -1648,7 +1774,6 @@ def _render_favorites_mode():
 
     fav_rows = df[df["scheme_name"].isin(fav_names)].sort_values("scheme_name")
 
-    # ✅ Ek baar load karo — loop ke andar disk read nahi
     apps = load_applications()
     favs = favorites_module.load_favorites()
     reminders = reminders_module.load_reminders()
@@ -1688,17 +1813,13 @@ def _render_reminders_mode():
             continue
 
         if days < 0:
-            status_text = t["reminder_overdue"]
-            status_color = "#FF4757"
+            status_text = t["reminder_overdue"]; status_color = "#FF4757"
         elif days == 0:
-            status_text = t["reminder_today"]
-            status_color = "#FF4757"
+            status_text = t["reminder_today"]; status_color = "#FF4757"
         elif days <= 7:
-            status_text = t["reminder_due_soon"].format(days=days)
-            status_color = "#FF9933"
+            status_text = t["reminder_due_soon"].format(days=days); status_color = "#FF9933"
         else:
-            status_text = t["reminder_upcoming"].format(days=days)
-            status_color = "#00FF88"
+            status_text = t["reminder_upcoming"].format(days=days); status_color = "#00FF88"
 
         note_html = (
             f'<p class="card-desc">{html.escape(info["note"])}</p>'
@@ -1955,6 +2076,259 @@ def _render_voice_assistant_mode():
             st.exception(e)
 
 
+# ===========================
+# MY DOCUMENTS MODE (v11 — OCR + Bookmarklet)
+# ===========================
+def _render_documents_mode():
+    st.markdown('<div class="mode-content-anchor"></div>', unsafe_allow_html=True)
+    st.markdown(f"### {t['docs_page_title']}")
+    st.caption(t['docs_page_caption'])
+
+    # ============================================================
+    # SECTION 0: OCR UPLOAD
+    # ============================================================
+    with st.expander(
+        t.get("docs_upload_section", "📷 Upload Document (Auto-Fill via OCR)"),
+        expanded=False,
+    ):
+        st.caption(
+            t.get(
+                "docs_upload_hint",
+                "Aadhaar/PAN ki clear photo upload karo — hum data nikaal ke form pre-fill kar denge.",
+            )
+        )
+
+        if not documents_vault.is_ocr_available():
+            st.warning(
+                t.get("docs_ocr_unavailable", "⚠️ OCR setup nahi hua.")
+            )
+            with st.expander("📖 Setup Steps"):
+                st.markdown(
+                    "**Tesseract OCR Setup (Windows):**\n\n"
+                    "1. Download: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                    "2. Install karte waqt **Hindi** language bhi select karo\n"
+                    "3. PATH mein add karo: `C:\\Program Files\\Tesseract-OCR`\n"
+                    "4. Python libs: `pip install pytesseract Pillow`\n"
+                    "5. Streamlit restart karo\n\n"
+                    f"**Current Status:** `{documents_vault.get_ocr_status()}`"
+                )
+        else:
+            uploaded = st.file_uploader(
+                t.get("docs_upload_btn", "📁 Choose Image"),
+                type=["jpg", "jpeg", "png"],
+                key="doc_ocr_upload",
+            )
+
+            if uploaded is not None:
+                col_preview, col_action = st.columns([1, 2])
+                with col_preview:
+                    try:
+                        st.image(uploaded, use_container_width=True)
+                    except Exception as e:
+                        st.caption(f"Preview error: {safe_str(e)[:60]}")
+
+                with col_action:
+                    if st.button(
+                        t.get("docs_extract_btn", "🔍 Extract & Auto-Fill"),
+                        key="doc_ocr_extract_btn",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        with st.spinner("🔍 Extracting text from image..."):
+                            extracted, error = documents_vault.extract_from_image(uploaded)
+
+                        # ✅ DEBUG: Show raw OCR text
+                        raw_text = documents_vault.get_last_ocr_text()
+                        if raw_text:
+                            st.markdown("**🔍 Debug: Raw OCR Text**")
+                            st.text_area(
+                                "Raw OCR",
+                                value=raw_text,
+                                height=200,
+                                disabled=True,
+                                label_visibility="collapsed",
+                                key="debug_raw_ocr",
+                            )
+
+                        if error:
+                            st.error(f"❌ {error}")
+                        elif extracted:
+                            for key, value in extracted.items():
+                                widget_key = f"doc_field_{key}"
+                                st.session_state[widget_key] = value
+                            st.success(
+                                t.get(
+                                    "docs_extract_success",
+                                    "✅ Data extracted! Review below.",
+                                )
+                            )
+                            st.json(extracted)
+                            st.rerun()
+                        else:
+                            st.warning(
+                                t.get(
+                                    "docs_extract_no_data",
+                                    "⚠️ Koi data nahi mila. Photo clear nahi hai.",
+                                )
+                            )
+
+    st.divider()
+
+    # ============================================================
+    # SECTION 1: FORM (Aadhaar fields upar, baaki expander mein)
+    # ============================================================
+    docs = documents_vault.load_documents()
+
+    with st.form("documents_form_v10", clear_on_submit=False):
+        new_data = {}
+
+        # ----- Aadhaar fields (main visible) -----
+        st.markdown("##### 🆔 Aadhaar Details")
+        st.caption("Ye fields aapke Aadhaar card par hoti hain")
+        col1, col2 = st.columns(2)
+        for i, (key, label_en, icon, label_hi) in enumerate(documents_vault.AADHAAR_FIELDS):
+            label = label_hi if lang_choice == "हिंदी" else label_en
+            target_col = col1 if i % 2 == 0 else col2
+            widget_key = f"doc_field_{key}"
+            with target_col:
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = docs.get(key, "")
+                new_data[key] = st.text_input(f"{icon} {label}", key=widget_key)
+
+        # ----- Extra fields (collapsed by default) -----
+        with st.expander("➕ Additional Details (optional, for form auto-fill)", expanded=False):
+            st.caption("Ye fields Aadhaar card par nahi hoti — manual bharein (bookmarklet ke liye)")
+            col3, col4 = st.columns(2)
+            for i, (key, label_en, icon, label_hi) in enumerate(documents_vault.EXTRA_FIELDS):
+                label = label_hi if lang_choice == "हिंदी" else label_en
+                target_col = col3 if i % 2 == 0 else col4
+                widget_key = f"doc_field_{key}"
+                with target_col:
+                    if widget_key not in st.session_state:
+                        st.session_state[widget_key] = docs.get(key, "")
+                    new_data[key] = st.text_input(f"{icon} {label}", key=widget_key)
+
+        # Submit buttons
+        col_save, col_clear = st.columns([3, 1])
+        with col_save:
+            save_clicked = st.form_submit_button(
+                t["docs_save_btn"], use_container_width=True, type="primary"
+            )
+        with col_clear:
+            clear_clicked = st.form_submit_button(
+                t["docs_clear_btn"], use_container_width=True
+            )
+
+        if save_clicked:
+            if documents_vault.save_documents(new_data):
+                st.success(t["docs_saved_msg"])
+                st.rerun()
+            else:
+                st.error("Save failed. Please try again.")
+
+        if clear_clicked:
+            documents_vault.clear_documents()
+            for key, _, _, _ in documents_vault.DOCUMENT_FIELDS:
+                st.session_state[f"doc_field_{key}"] = ""
+            st.success(t["docs_cleared_msg"])
+            st.rerun()
+
+    docs = documents_vault.load_documents()
+    non_empty_docs = {k: v for k, v in docs.items() if v and str(v).strip()}
+
+    if not non_empty_docs:
+        st.info(t["docs_empty_warning"])
+        st.divider()
+        return
+
+    # ============================================================
+    # SECTION 2: COPY BUTTONS
+    # ============================================================
+    st.divider()
+    st.markdown(f"#### {t['docs_copy_section']}")
+    st.caption(t['docs_copy_hint'])
+
+    import html as _html
+    copy_items = []
+    for key, label_en, icon, label_hi in documents_vault.DOCUMENT_FIELDS:
+        val = docs.get(key, "")
+        if not val or not str(val).strip():
+            continue
+        label = label_hi if lang_choice == "हिंदी" else label_en
+        safe_label = _html.escape(f"{icon} {label}", quote=True)
+        js_val = str(val).replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+        copy_items.append(
+            '<div style="display:flex; align-items:center; justify-content:space-between; '
+            'padding:10px 14px; margin:6px 0; background:#1f2c34; '
+            'border:1px solid rgba(0,229,255,0.2); border-radius:8px;">'
+            f'<div><div style="color:#8696A0; font-size:11px; text-transform:uppercase; '
+            f'letter-spacing:1px;">{safe_label}</div>'
+            f'<div style="color:#e9edef; font-size:14px; margin-top:2px; '
+            f'font-family:monospace;">{_html.escape(str(val))}</div></div>'
+            f'<button onclick="navigator.clipboard.writeText(\'{js_val}\')" '
+            'style="background:#00E5FF; color:#0b141a; border:none; padding:8px 14px; '
+            'border-radius:6px; cursor:pointer; font-weight:600; font-size:12px;">'
+            '📋 Copy</button>'
+            '</div>'
+        )
+
+    copy_html = (
+        '<div style="font-family:system-ui,sans-serif;">'
+        + "".join(copy_items)
+        + '</div>'
+    )
+    components.html(copy_html, height=min(120 + len(copy_items) * 62, 600), scrolling=True)
+
+    # ============================================================
+    # SECTION 3: BOOKMARKLET
+    # ============================================================
+    st.divider()
+    st.markdown(f"#### {t['docs_bookmarklet_section']}")
+    st.caption(t['docs_bookmarklet_hint'])
+
+    st.markdown(
+        f"<div style='background:rgba(0,229,255,0.06); border-left:3px solid #00E5FF; "
+        f"padding:12px 16px; border-radius:8px; margin:10px 0;'>"
+        f"<div style='color:#e9edef; font-size:13px; line-height:1.8;'>"
+        f"{t['docs_step_1']}<br>{t['docs_step_2']}<br>"
+        f"{t['docs_step_3']}<br>{t['docs_step_4']}"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    bookmarklet_js = documents_vault.generate_bookmarklet(docs)
+    safe_href = bookmarklet_js.replace("&", "&amp;").replace('"', "&quot;")
+
+    drag_html = (
+        '<div style="font-family:system-ui,sans-serif; text-align:center; padding:20px;">'
+        f'<a href="{safe_href}" draggable="true" '
+        'onclick="event.preventDefault(); alert(\'⚠️ Is link ko CLICK mat karein — DRAG karke bookmarks bar mein chhodein.\');" '
+        'style="display:inline-block; padding:14px 28px; '
+        'background:linear-gradient(135deg,#00E5FF,#A855F7); color:#0b141a; '
+        'font-weight:700; font-size:15px; border-radius:10px; '
+        'text-decoration:none; cursor:grab; '
+        'box-shadow:0 4px 20px rgba(0,229,255,0.4); '
+        'user-select:none;">'
+        f'{t["docs_drag_here"]}'
+        '</a>'
+        '<p style="color:#8696A0; font-size:11px; margin-top:14px;">'
+        'Chrome/Edge: Ctrl+Shift+B se bookmarks bar dikhayein'
+        '</p>'
+        '</div>'
+    )
+    components.html(drag_html, height=140)
+
+    st.markdown(
+        f"<div style='background:rgba(255,153,51,0.08); border-left:3px solid #FF9933; "
+        f"padding:10px 14px; border-radius:8px; margin-top:8px;'>"
+        f"<p style='color:#FFB648; font-size:12px; margin:0;'>{t['docs_bookmarklet_warning']}</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.caption(t["docs_regenerate_hint"])
+
+
 def _render_settings_mode():
     st.markdown('<div class="mode-content-anchor"></div>', unsafe_allow_html=True)
     st.info(t["settings_use_sidebar"])
@@ -1970,11 +2344,11 @@ try:
         t["mode_admin"]: _render_admin_mode,
         t["mode_assistant"]: _render_assistant_mode,
         t["mode_voice_assistant"]: _render_voice_assistant_mode,
+        t["mode_documents"]: _render_documents_mode,
         t["mode_settings"]: _render_settings_mode,
         t["mode_form"]: _render_eligibility_mode,
         t["mode_nl"]: _render_nl_mode,
         t["mode_favorites"]: _render_favorites_mode,
-        t["mode_reminders"]: _render_reminders_mode,
         t["mode_history"]: _render_history_mode,
         t["mode_faq"]: _render_faq_mode,
         t["mode_csc"]: _render_csc_mode,

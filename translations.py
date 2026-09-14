@@ -1,12 +1,20 @@
 """
 translations.py — UI text translations for English and Hindi.
 
-FIXES (v2):
-  - Missing keys added: listening_text, not_supported_text, error_text
-    (jo voice_input.py use karta hai — pehle missing the).
-  - get_text() ab missing-key warning bhi deta hai (dev-friendly).
-  - get_text() non-existent language ke liye safe fallback.
-  - Added helper: get_all_keys() — verification scripts ke liye.
+FIXES (v4):
+  - v10 "My Documents" feature ke liye 25+ nayi keys add ki (both languages):
+      mode_documents, docs_page_title, docs_page_caption, docs_form_heading,
+      docs_form_hint, docs_save_btn, docs_saved_msg, docs_clear_btn,
+      docs_cleared_msg, docs_empty_warning, docs_copy_section, docs_copy_hint,
+      docs_bookmarklet_section, docs_bookmarklet_hint, docs_step_1..4,
+      docs_drag_here, docs_bookmarklet_warning, docs_regenerate_hint,
+      docs_no_bookmarklet
+  - Self-test ab in naye keys ko bhi check karta hai.
+  - v3, v2 ke saare fixes intact.
+
+FIXES (v3, inherited):
+  - "Alerts & Reminders" merge ke saare keys intact
+  - "mode_reminders" key retained (backward compat)
 """
 
 TRANSLATIONS = {
@@ -55,16 +63,54 @@ TRANSLATIONS = {
         "mode_form": "Eligibility Check",
         "mode_nl": "Search Schemes",
         "mode_favorites": "Favorites",
-        "mode_reminders": "Reminders",
+        "mode_reminders": "Reminders",          # kept for backward-compat redirect
         "mode_history": "Search History",
         "mode_faq": "FAQ",
         "mode_csc": "CSC Locator",
         "mode_dashboard": "Dashboard",
         "mode_settings": "Settings",
-        "mode_notifications": "Notifications",
+        "mode_notifications": "Alerts & Reminders",   # v8: renamed (merged page)
         "mode_admin": "Admin Panel",
-        "mode_assistant": "Assistant",
+        "mode_assistant": "AI Assistant",
         "mode_voice_assistant": "Voice Assistant",
+        "mode_documents": "My Documents",        # v10: NEW
+
+        # ===========================
+        # My Documents (v10 Bookmarklet Auto-Fill)
+        # ===========================
+        "docs_page_title": "My Documents Vault",
+        "docs_page_caption": "Apna personal data ek baar bharein — phir kisi bhi govt site par auto-fill karein",
+        "docs_form_heading": "📋 Personal Information",
+        "docs_form_hint": "Ye data sirf aapke computer par save hota hai. Kisi server par nahi jaata.",
+        "docs_save_btn": "💾 Save Documents",
+        "docs_saved_msg": "✅ Documents saved successfully!",
+        "docs_clear_btn": "🗑️ Clear All Documents",
+        "docs_cleared_msg": "🗑️ All documents cleared",
+        "docs_empty_warning": "⚠️ Pehle upar form bhar ke Save karein, phir bookmarklet generate hoga",
+        "docs_copy_section": "📄 Copy Buttons",
+        "docs_copy_hint": "Kabhi-kabhi bookmarklet kaam nahi karta (CSP block). Aise waqt mein ye buttons use karein:",
+        "docs_bookmarklet_section": "⚡ Bookmarklet (Auto-Fill)",
+        "docs_bookmarklet_hint": "Ye ek chhota JavaScript hai. Ise bookmarks bar mein drag karke rakhein. Kisi bhi govt site par form fill karte waqt click karein — ek floating panel khulega jisme har field ka button hoga.",
+        "docs_step_1": "1️⃣ Neeche wale button ko apne browser ke bookmarks bar mein DRAG karein (click nahi, drag)",
+        "docs_step_2": "2️⃣ Bookmarks bar dikhana hai to Ctrl+Shift+B dabayein (Chrome/Edge)",
+        "docs_step_3": "3️⃣ Kisi bhi govt site par form kholo, aur uska input box pehle click karo (cursor wahan rakh do)",
+        "docs_step_4": "4️⃣ Bookmarks bar mein '⚡ Fill Form' par click karo — panel khulega, phir field button dabao",
+        "docs_drag_here": "⚡ Fill Form — Drag this to Bookmarks Bar",
+        "docs_bookmarklet_warning": "⚠️ Bookmarklet mein aapka data base64-encoded hai (plain text nahi). Lekin ye aapke browser ke bookmarks mein save hota hai — apna browser/profile kisi ke saath share na karein.",
+        "docs_regenerate_hint": "🔄 Agar aapne upar data update kiya hai, to yahan bookmarklet dobara drag karein (purana delete karke)",
+        "docs_no_bookmarklet": "Bookmarklet generate karne ke liye pehle upar data save karein.",
+
+        # ===========================
+        # Alerts & Reminders (v8 merged page)
+        # ===========================
+        "alerts_page_title": "Alerts & Reminders",
+        "alerts_page_caption": "Your reminders + favorite-scheme deadlines",
+        "alerts_tab_reminders": "⏰ My Reminders",
+        "alerts_tab_deadlines": "⭐ Deadline Alerts",
+        "alerts_tab_all": "📋 All Alerts",
+        "alerts_no_items": "No reminders or deadline alerts yet. Favorite some schemes or set reminders.",
+        "alerts_urgent_count": "{count} urgent items",
+        "alerts_load_more": "Load More Reminders",
 
         # ===========================
         # Natural Language Search
@@ -171,8 +217,6 @@ TRANSLATIONS = {
         "voice_not_supported": "Voice search not supported in this browser.",
         "voice_error": "Error:",
         "voice_hint": "Tap the microphone and speak your query",
-
-        # ✅ NEW: voice_input.py ke liye missing keys
         "listening_text": "Listening...",
         "not_supported_text": "Voice search not supported in this browser. Please use Chrome or Edge.",
         "error_text": "Error:",
@@ -224,7 +268,7 @@ TRANSLATIONS = {
         "settings_use_sidebar": "⚙️ Use the panel on the left sidebar to update your profile, notifications, and accessibility settings.",
 
         # ===========================
-        # Notification Center
+        # Notification Center (legacy — kept for backward compat)
         # ===========================
         "notif_title": "Notification Center",
         "notif_reminders": "⏰ Reminders",
@@ -317,16 +361,54 @@ TRANSLATIONS = {
         "mode_form": "पात्रता जांच",
         "mode_nl": "योजनाएं खोजें",
         "mode_favorites": "पसंदीदा",
-        "mode_reminders": "रिमाइंडर",
+        "mode_reminders": "रिमाइंडर",           # backward-compat redirect ke liye
         "mode_history": "खोज इतिहास",
         "mode_faq": "सामान्य प्रश्न",
         "mode_csc": "सीएससी लोकेटर",
         "mode_dashboard": "डैशबोर्ड",
         "mode_settings": "सेटिंग्स",
-        "mode_notifications": "सूचनाएं",
+        "mode_notifications": "अलर्ट और रिमाइंडर",   # v8: renamed (merged)
         "mode_admin": "एडमिन पैनल",
-        "mode_assistant": "सहायक",
+        "mode_assistant": "AI सहायक",
         "mode_voice_assistant": "वॉइस सहायक",
+        "mode_documents": "मेरे दस्तावेज़",       # v10: NEW
+
+        # ===========================
+        # My Documents (v10 Bookmarklet Auto-Fill)
+        # ===========================
+        "docs_page_title": "मेरे दस्तावेज़ वॉल्ट",
+        "docs_page_caption": "अपना व्यक्तिगत डेटा एक बार भरें — फिर किसी भी सरकारी साइट पर ऑटो-फिल करें",
+        "docs_form_heading": "📋 व्यक्तिगत जानकारी",
+        "docs_form_hint": "यह डेटा केवल आपके कंप्यूटर पर सेव होता है। किसी सर्वर पर नहीं जाता।",
+        "docs_save_btn": "💾 दस्तावेज़ सेव करें",
+        "docs_saved_msg": "✅ दस्तावेज़ सफलतापूर्वक सेव हो गए!",
+        "docs_clear_btn": "🗑️ सारे दस्तावेज़ हटाएं",
+        "docs_cleared_msg": "🗑️ सारे दस्तावेज़ हटा दिए गए",
+        "docs_empty_warning": "⚠️ पहले ऊपर फॉर्म भर के Save करें, फिर bookmarklet जनरेट होगा",
+        "docs_copy_section": "📄 कॉपी बटन",
+        "docs_copy_hint": "कभी-कभी bookmarklet काम नहीं करता (CSP ब्लॉक)। ऐसे समय में ये बटन उपयोग करें:",
+        "docs_bookmarklet_section": "⚡ Bookmarklet (ऑटो-फिल)",
+        "docs_bookmarklet_hint": "यह एक छोटा JavaScript है। इसे bookmarks bar में drag करके रखें। किसी भी सरकारी साइट पर फॉर्म भरते समय क्लिक करें — एक floating panel खुलेगा जिसमें हर फ़ील्ड का बटन होगा।",
+        "docs_step_1": "1️⃣ नीचे वाले बटन को अपने browser के bookmarks bar में DRAG करें (click नहीं, drag)",
+        "docs_step_2": "2️⃣ Bookmarks bar दिखाने के लिए Ctrl+Shift+B दबाएं (Chrome/Edge)",
+        "docs_step_3": "3️⃣ किसी भी सरकारी साइट पर फॉर्म खोलें, और उसके input box पर पहले click करें (cursor वहीं रखें)",
+        "docs_step_4": "4️⃣ Bookmarks bar में '⚡ Fill Form' पर click करें — panel खुलेगा, फिर फ़ील्ड बटन दबाएं",
+        "docs_drag_here": "⚡ Fill Form — इसे Bookmarks Bar में Drag करें",
+        "docs_bookmarklet_warning": "⚠️ Bookmarklet में आपका डेटा base64-encoded है (plain text नहीं)। लेकिन यह आपके browser के bookmarks में सेव होता है — अपना browser/profile किसी के साथ शेयर न करें।",
+        "docs_regenerate_hint": "🔄 अगर आपने ऊपर डेटा अपडेट किया है, तो यहां bookmarklet दोबारा drag करें (पुराना delete करके)",
+        "docs_no_bookmarklet": "Bookmarklet जनरेट करने के लिए पहले ऊपर डेटा save करें।",
+
+        # ===========================
+        # Alerts & Reminders (v8 merged page)
+        # ===========================
+        "alerts_page_title": "अलर्ट और रिमाइंडर",
+        "alerts_page_caption": "आपके रिमाइंडर + पसंदीदा योजनाओं की डेडलाइन",
+        "alerts_tab_reminders": "⏰ मेरे रिमाइंडर",
+        "alerts_tab_deadlines": "⭐ डेडलाइन अलर्ट",
+        "alerts_tab_all": "📋 सभी अलर्ट",
+        "alerts_no_items": "अभी तक कोई रिमाइंडर या डेडलाइन अलर्ट नहीं है। योजनाओं को पसंदीदा बनाएं या रिमाइंडर सेट करें।",
+        "alerts_urgent_count": "{count} अत्यावश्यक",
+        "alerts_load_more": "और रिमाइंडर लोड करें",
 
         # ===========================
         # Natural Language Search
@@ -433,8 +515,6 @@ TRANSLATIONS = {
         "voice_not_supported": "इस ब्राउज़र में वॉइस सर्च समर्थित नहीं है।",
         "voice_error": "त्रुटि:",
         "voice_hint": "माइक्रोफ़ोन दबाएं और अपना सवाल बोलें",
-
-        # ✅ NEW: voice_input.py ke liye missing keys (Hindi)
         "listening_text": "सुन रहा हूं...",
         "not_supported_text": "इस ब्राउज़र में वॉइस सर्च समर्थित नहीं है। कृपया Chrome या Edge उपयोग करें।",
         "error_text": "त्रुटि:",
@@ -486,7 +566,7 @@ TRANSLATIONS = {
         "settings_use_sidebar": "⚙️ अपनी प्रोफाइल, सूचनाएं और एक्सेसिबिलिटी सेटिंग्स अपडेट करने के लिए बाएं साइडबार का उपयोग करें।",
 
         # ===========================
-        # Notification Center
+        # Notification Center (legacy)
         # ===========================
         "notif_title": "सूचना केंद्र",
         "notif_reminders": "⏰ रिमाइंडर",
@@ -573,7 +653,7 @@ def find_missing_keys(source_lang="English", target_lang="हिंदी"):
 # ===========================
 if __name__ == "__main__":
     print("=" * 60)
-    print("translations.py — Verification")
+    print("translations.py — Verification (v4)")
     print("=" * 60)
 
     # 1. Both languages present
@@ -605,17 +685,53 @@ if __name__ == "__main__":
         assert key in TRANSLATIONS["हिंदी"], f"Missing in Hindi: {key}"
     print("✅ Voice input keys present in both languages")
 
-    # 6. Specific keys used by app.py
+    # 6. Alerts merge keys present (v8)
+    alerts_keys = [
+        "alerts_page_title", "alerts_page_caption",
+        "alerts_tab_reminders", "alerts_tab_deadlines", "alerts_tab_all",
+        "alerts_no_items", "alerts_urgent_count", "alerts_load_more",
+    ]
+    for key in alerts_keys:
+        assert key in TRANSLATIONS["English"], f"Missing in English: {key}"
+        assert key in TRANSLATIONS["हिंदी"], f"Missing in Hindi: {key}"
+    print(f"✅ All {len(alerts_keys)} Alerts-merge keys present in both languages")
+
+    # 7. NEW v10: Documents Vault keys present
+    docs_keys = [
+        "mode_documents",
+        "docs_page_title", "docs_page_caption",
+        "docs_form_heading", "docs_form_hint",
+        "docs_save_btn", "docs_saved_msg",
+        "docs_clear_btn", "docs_cleared_msg",
+        "docs_empty_warning",
+        "docs_copy_section", "docs_copy_hint",
+        "docs_bookmarklet_section", "docs_bookmarklet_hint",
+        "docs_step_1", "docs_step_2", "docs_step_3", "docs_step_4",
+        "docs_drag_here", "docs_bookmarklet_warning",
+        "docs_regenerate_hint", "docs_no_bookmarklet",
+    ]
+    for key in docs_keys:
+        assert key in TRANSLATIONS["English"], f"Missing in English: {key}"
+        assert key in TRANSLATIONS["हिंदी"], f"Missing in Hindi: {key}"
+    print(f"✅ All {len(docs_keys)} Documents-Vault keys present in both languages")
+
+    # 8. Backward-compat: mode_reminders still present
+    assert "mode_reminders" in TRANSLATIONS["English"]
+    assert "mode_reminders" in TRANSLATIONS["हिंदी"]
+    print("✅ mode_reminders key retained (backward compat)")
+
+    # 9. Specific keys used by app.py
     required_keys = [
         "title", "subtitle", "disclaimer", "age", "gender", "occupation",
         "income", "category", "state", "scheme_category", "only_eligible",
         "search_btn", "all", "total_shown", "eligible_label", "not_eligible_label",
         "no_results", "what_is", "benefit", "eligibility_breakdown",
         "eligible_badge", "not_eligible_badge", "hint", "mode_form", "mode_nl",
-        "mode_favorites", "mode_reminders", "mode_history", "mode_faq", "mode_csc",
+        "mode_favorites", "mode_history", "mode_faq", "mode_csc",
         "mode_dashboard", "mode_settings", "mode_notifications", "mode_admin",
-        "mode_assistant", "mode_voice_assistant", "theme_label", "theme_dark",
-        "theme_light", "sort_label", "sort_default_form", "sort_default_nl",
+        "mode_assistant", "mode_voice_assistant", "mode_documents",
+        "theme_label", "theme_dark", "theme_light",
+        "sort_label", "sort_default_form", "sort_default_nl",
         "sort_name", "sort_category", "sort_state", "nl_placeholder",
         "nl_search_btn", "nl_matches_found", "nl_no_results", "nl_note",
         "nl_hint", "suggestions_label", "favorites_title", "favorites_empty",
@@ -636,6 +752,12 @@ if __name__ == "__main__":
         "quick_actions_title", "quick_actions_caption", "qa_find_schemes_title",
         "qa_find_schemes_desc", "qa_smart_search_title", "qa_smart_search_desc",
         "qa_ai_assistant_title", "qa_ai_assistant_desc",
+        # v8 alerts keys
+        "alerts_page_title", "alerts_page_caption",
+        "alerts_tab_reminders", "alerts_tab_deadlines", "alerts_tab_all",
+        "alerts_no_items", "alerts_urgent_count", "alerts_load_more",
+        # v10 documents keys
+        *docs_keys,
     ]
     missing_required = []
     for key in required_keys:
@@ -649,5 +771,5 @@ if __name__ == "__main__":
         print(f"✅ All {len(required_keys)} app-critical keys present in both languages")
 
     print("=" * 60)
-    print("✅ translations.py — ALL CHECKS PASSED")
+    print("✅ translations.py v4 — ALL CHECKS PASSED")
     print("=" * 60)
