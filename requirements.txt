@@ -18,3 +18,7 @@ edge-tts
 beautifulsoup4
 lxml
 requests
+pytesseract
+Pillow
+opencv-python-headless
+qrcode[pil]
